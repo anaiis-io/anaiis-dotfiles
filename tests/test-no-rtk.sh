@@ -28,7 +28,7 @@ assert() {
 }
 
 # names_rtk <file>: true when the text of the file mentions rtk. The file name of this suite does not
-# count: the README tests tree lists every suite by name, and that name wires nothing.
+# count: a file that lists suites by name wires nothing.
 names_rtk() {
 	grep -Ii rtk "$1" | sed 's/test-no-rtk\.sh//g' | grep -iq rtk
 }
