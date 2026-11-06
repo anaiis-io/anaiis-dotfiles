@@ -3,15 +3,17 @@
 #
 # Installs three dispatcher hooks:
 #   pre-commit -> bash "$HOME/.claude/hooks/repo-pre-commit.sh"         (staged-file linters)
-#   pre-push   -> bash "$HOME/.claude/hooks/repo-pre-push.sh"           (full test suite)
+#   pre-push   -> bash "$HOME/.claude/hooks/repo-pre-push.sh" "$@"      (full test suite, email check)
 #   commit-msg -> bash "$HOME/.claude/hooks/repo-commit-msg.sh" "$1"    (message lint, opt-in)
 #
 # The commit-msg hook checks a message only in a repo whose working tree has a
 # .conventional-commits file at its root. Other repos accept any message.
 #
 # Run once from any project root after cloning on a new machine.
-# Safe to re-run -- migrates stale direct-path pre-commit hooks automatically
-# and adds the pre-push and commit-msg hooks to repos that lack them.
+# Safe to re-run -- migrates stale direct-path pre-commit hooks automatically,
+# adds the pre-push and commit-msg hooks to repos that lack them, and rewrites the
+# old pre-push dispatcher line (no "$@") in place. The rewrite changes only that
+# one line and leaves any custom hook content alone.
 #
 # Usage:
 #   cd /path/to/repo
@@ -40,7 +42,9 @@ STALE_MARKER='lint-staged.sh'
 
 # The single line each hook calls (paths never change)
 PRE_COMMIT_LINE='bash "$HOME/.claude/hooks/repo-pre-commit.sh"'
-PRE_PUSH_LINE='bash "$HOME/.claude/hooks/repo-pre-push.sh"'
+PRE_PUSH_LINE='bash "$HOME/.claude/hooks/repo-pre-push.sh" "$@"'
+# The line that shims installed before git's arguments reached the dispatcher still hold.
+PRE_PUSH_OLD_LINE='bash "$HOME/.claude/hooks/repo-pre-push.sh"'
 COMMIT_MSG_LINE='bash "$HOME/.claude/hooks/repo-commit-msg.sh" "$1"'
 
 # ---------------------------------------------------------------------------
@@ -76,6 +80,18 @@ _migrate() {
 }
 
 # ---------------------------------------------------------------------------
+# _migrate_push_line: rewrite each whole line that equals the old pre-push
+# dispatcher line. The write goes through cat, so the mode of the hook stays.
+# ---------------------------------------------------------------------------
+_migrate_push_line() {
+	local hook="$1" tmp
+	tmp=$(mktemp)
+	awk -v old="$PRE_PUSH_OLD_LINE" -v new="$PRE_PUSH_LINE" '$0 == old { print new; next } { print }' "$hook" >"$tmp"
+	cat "$tmp" >"$hook"
+	rm -f "$tmp"
+}
+
+# ---------------------------------------------------------------------------
 # _install <hook-name> <dispatcher-line> <marker> <label> <title>
 #   Create the hook if absent; report ok if its marker is already present;
 #   otherwise append the dispatcher line, preserving existing content.
@@ -90,6 +106,12 @@ _install() {
 			"$title" "$label" "$line" >"$hook"
 		chmod +x "$hook"
 		echo "  created  $hook"
+
+	elif [ "$name" = "pre-push" ] && grep -qFx -- "$PRE_PUSH_OLD_LINE" "$hook"; then
+		# Whole-line match only: a line with other text after the call is custom and stays.
+		_migrate_push_line "$hook"
+		chmod +x "$hook"
+		echo "  migrated $hook (pre-push dispatcher now receives the remote name and URL)"
 
 	elif grep -qF "$marker" "$hook"; then
 		chmod +x "$hook"

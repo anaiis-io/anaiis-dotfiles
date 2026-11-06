@@ -8,7 +8,9 @@
 #
 # Method: each case builds a throwaway HOME that is healthy, breaks exactly one thing, and expects
 # exactly one MISSING line. The doctor runs with a PATH that holds only the tools it may use, so the
-# real gh and the real Homebrew never answer. A stub gh answers `config get git_protocol`.
+# real gh and the real Homebrew never answer. A stub gh answers `config get git_protocol` and the one
+# call that gh-noreply-address.sh makes. The git config is the one in the throwaway HOME: check 9 reads
+# `git config --global`, and the suite clears the variables that could point git elsewhere.
 #
 # Env override, used for the fail-to-fail check:
 #   DOCTOR   path of the script under test
@@ -19,6 +21,9 @@ set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCTOR="${DOCTOR:-$REPO_DIR/claude/scripts/bootstrap-doctor.sh}"
+
+# Check 9 runs `git config --global`. These variables would make git read another file than $HOME/.gitconfig.
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM GIT_CONFIG_COUNT XDG_CONFIG_HOME 2>/dev/null || true
 
 PASS=0
 FAIL=0
@@ -67,20 +72,30 @@ mkdir -p "$TMPD/stub"
 cat >"$TMPD/stub/gh" <<'EOF'
 #!/bin/sh
 # POSIX sh, not env bash: the doctor runs with a PATH that holds no env and no bash.
-# Accepts exactly: config get git_protocol --host github.com (the value for github.com) and
-# config get git_protocol (the global value). STUB_PROTOCOL is the github.com value; empty means the key
-# is unset. STUB_GLOBAL_PROTOCOL is the global value (default https).
+# Accepts exactly three calls. config get git_protocol --host github.com (the value for github.com) and
+# config get git_protocol (the global value): STUB_PROTOCOL is the github.com value, and empty means the
+# key is unset; STUB_GLOBAL_PROTOCOL is the global value (default https). api user --jq <the expression of
+# gh-noreply-address.sh>: STUB_GH_USER is the address to print, and empty makes the stub fail, like a gh
+# that is not signed in.
 case "$*" in
 	"config get git_protocol --host github.com")
 		[ -n "${STUB_PROTOCOL:-}" ] || exit 1
 		echo "$STUB_PROTOCOL"
+		exit 0
 		;;
-	"config get git_protocol") echo "${STUB_GLOBAL_PROTOCOL:-https}" ;;
-	*)
-		echo "stub gh: unexpected arguments: $*" >&2
-		exit 64
+	"config get git_protocol")
+		echo "${STUB_GLOBAL_PROTOCOL:-https}"
+		exit 0
+		;;
+	'api user --jq "\(.id)+\(.login)@users.noreply.github.com"')
+		[ -z "${STUB_GH_LOG:-}" ] || echo "$*" >>"$STUB_GH_LOG"
+		[ -n "${STUB_GH_USER:-}" ] || exit 4
+		echo "$STUB_GH_USER"
+		exit 0
 		;;
 esac
+echo "stub gh: unexpected arguments: $*" >&2
+exit 64
 EOF
 chmod +x "$TMPD/stub/gh"
 cat >"$TMPD/stub/claude" <<'EOF'
@@ -154,6 +169,7 @@ SETTINGS_JSON="$(jq -cn --arg pin "$STUB_PIN" --arg cmd '${CLAUDE_CODE_SHELL:-ba
 	hooks: {Stop: [{hooks: [{type: "command", command: $cmd}]}]},
 	statusLine: {type: "command", command: $cmd}}')"
 NAMES="settings.json keybindings.json rules commands skills agents hooks scripts"
+GIT_NOREPLY="123456+octo@users.noreply.github.com"
 
 # build_home: print the path of a new, healthy HOME. The repo sits elsewhere and ~/anaiis-dotfiles
 # links to it, as install.sh arranges when the clone is not at the canonical path. ~/.claude/memory is
@@ -180,6 +196,7 @@ build_home() {
 	# shellcheck disable=SC2016 # $HOME stays literal
 	printf '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >"$h/.bash_profile"
 	printf 'github.com %s\n' "$KEYTEXT" >"$h/.ssh/known_hosts"
+	printf '[user]\n\temail = %s\n' "$GIT_NOREPLY" >"$h/.gitconfig"
 	mkdir -p "$h/.config/anaiis-dotfiles"
 	printf '%s\n' "$TERM_SECRET" >"$h/.config/anaiis-dotfiles/employer-terms.txt"
 	printf '%s\n' "$h"
@@ -190,12 +207,15 @@ build_home() {
 # global answer. BIN_DIR (default $TMPD/bin) sets PATH.
 # CLAUDE_V (default: a new version) sets the line that the stub claude prints for --version.
 # SQLFMT_V (default: version 0.32.0) sets the line that the stub sqlfmt prints. Empty makes it fail.
+# GH_USER (default empty) sets the address that the stub gh prints for `api user`. Empty means not signed in.
+# GH_LOG (default empty) names a file where the stub gh appends one line for each `api user` call.
 # TERMS_ENV and TERMS_XDG (default empty) set EMPLOYER_TERMS_FILE and XDG_CONFIG_HOME, so the real
 # environment of the machine never reaches the doctor.
 doctor() {
 	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" STUB_GLOBAL_PROTOCOL="${PROTO_GLOBAL-https}" \
 		EMPLOYER_TERMS_FILE="${TERMS_ENV-}" XDG_CONFIG_HOME="${TERMS_XDG-}" \
-		STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
+		STUB_GH_USER="${GH_USER-}" STUB_GH_LOG="${GH_LOG-}" STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
+
 	RC=$?
 }
 
@@ -238,8 +258,9 @@ assert_eq "0.1 exit code 0" 0 "$RC"
 assert_eq "0.2 no MISSING line" 0 "$(miss_count)"
 assert_eq "0.3 summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
 # 2 bashrc + 1 login + 8 links + 1 memory folder + 2 enabled plugins + 1 host key + 1 claude version
-# + 1 harness bash pin + 1 hook command prefix + 1 sqlfmt. The disabled plugin is not listed.
-assert_eq "0.4 twenty ok lines" 20 "$(ok_count)"
+# + 1 harness bash pin + 1 hook command prefix + 1 sqlfmt + 1 employer terms file + 1 git email. The
+# disabled plugin is not listed.
+assert_eq "0.4 twenty-one ok lines" 21 "$(ok_count)"
 assert_eq "0.5 the disabled plugin is not checked" 0 "$(printf '%s\n' "$OUT" | grep -c 'off@mk3' || true)"
 assert_eq "0.6 the HOME is unchanged" "$SNAP0" "$(snapshot "$H0")"
 assert_eq "0.7 a real memory folder is ok" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok ~/.claude/memory (local folder)$' || true)"
@@ -619,6 +640,65 @@ TERMS_XDG="$H/xdg" doctor "$H"
 assert_eq "11.11 XDG_CONFIG_HOME moves the default folder: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
 TERMS_ENV="$H/missing.txt" doctor "$H"
 assert_eq "11.12 EMPLOYER_TERMS_FILE names an absent file: the WARN line" "WARN employer terms file (absent): $FIX_TERMS" "$(warn_lines)"
+
+echo "--- 12. the global git email"
+# The README (section "Install") sets user.email in the git config of the machine, and nothing else
+# checks it. A machine that skips it commits as $USER@host or as a stale work address, also in public
+# repos. A gap is a WARN, not missing: a work machine may keep a work address on purpose. The fix names the derived address when the
+# helper finds one (a signed-in gh), else the placeholder.
+FIX_EMAIL_PLACEHOLDER='git config --global user.email <id>+<login>@users.noreply.github.com'
+FIX_EMAIL_DERIVED="git config --global user.email $GIT_NOREPLY"
+doctor "$H0"
+assert_eq "12.1 a noreply address: the ok line names it" 1 "$(printf '%s\n' "$OUT" | grep -cFx "ok git email $GIT_NOREPLY" || true)"
+assert_eq "12.2 a noreply address: no WARN line" "" "$(warn_lines)"
+H="$(build_home)"
+printf '[user]\n\temail = octo@users.noreply.github.com\n' >"$H/.gitconfig"
+doctor "$H"
+assert_eq "12.3 the <login> noreply shape is ok too" 1 "$(printf '%s\n' "$OUT" | grep -cFx 'ok git email octo@users.noreply.github.com' || true)"
+
+H="$(build_home)"
+rm "$H/.gitconfig"
+SNAP12="$(snapshot "$H")"
+doctor "$H"
+assert_eq "12.4 unset: exit code 0" 0 "$RC"
+assert_eq "12.5 unset: the one WARN line names the placeholder fix" \
+	"WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
+assert_eq "12.6 unset: summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
+assert_eq "12.7 unset: no ok line for the git email" 0 "$(printf '%s\n' "$OUT" | grep -c '^ok git email' || true)"
+assert_eq "12.8 the check changes nothing in the HOME" "$SNAP12" "$(snapshot "$H")"
+GH_USER="$GIT_NOREPLY" doctor "$H"
+assert_eq "12.9 unset with a signed-in gh: the fix names the derived address" \
+	"WARN git email (global user.email is unset): $FIX_EMAIL_DERIVED" "$(warn_lines)"
+BIN_DIR="$TMPD/bin-nogh" GH_USER="$GIT_NOREPLY" doctor "$H"
+assert_eq "12.10 unset without gh: the fix keeps the placeholder" \
+	"WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
+
+H="$(build_home)"
+printf '[user]\n\temail = pat@example.com\n' >"$H/.gitconfig"
+doctor "$H"
+assert_eq "12.11 a work address: exit code 0" 0 "$RC"
+assert_eq "12.12 a work address: the one WARN line names the address and the fix" \
+	"WARN git email (pat@example.com is not a GitHub noreply address): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
+assert_eq "12.13 a work address: no MISSING line, summary line" "0 doctor: 0 missing" \
+	"$(miss_count) $(printf '%s\n' "$OUT" | tail -n 1)"
+assert_eq "12.14 a work address: no ok line for the git email" 0 "$(printf '%s\n' "$OUT" | grep -c '^ok git email' || true)"
+GH_USER="$GIT_NOREPLY" doctor "$H"
+assert_eq "12.15 a work address with a signed-in gh: the fix names the derived address" \
+	"WARN git email (pat@example.com is not a GitHub noreply address): $FIX_EMAIL_DERIVED" "$(warn_lines)"
+H="$(build_home)"
+printf '[user]\n\temail = octo@users.noreply.github.com.evil.io\n' >"$H/.gitconfig"
+doctor "$H"
+assert_eq "12.16 a look-alike domain is a WARN" 1 "$(warn_lines | grep -c '^WARN git email (octo@users.noreply.github.com.evil.io is not' || true)"
+H="$(build_home)"
+printf '[user]\n\temail =\n' >"$H/.gitconfig"
+doctor "$H"
+assert_eq "12.17 an empty value counts as unset" "WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
+# The helper asks gh for the network. The ok branch has no use for the answer, so it never calls gh.
+rm -f "$TMPD/gh-api-user.log"
+GH_LOG="$TMPD/gh-api-user.log" doctor "$H0"
+assert_eq "12.18 a noreply address: the doctor does not call gh api user" 0 "$({ cat "$TMPD/gh-api-user.log" 2>/dev/null || true; } | grep -c 'api user' || true)"
+GH_LOG="$TMPD/gh-api-user.log" doctor "$H"
+assert_eq "12.19 an empty address: the doctor calls gh api user once, for the fix text" 1 "$({ cat "$TMPD/gh-api-user.log" 2>/dev/null || true; } | grep -c 'api user' || true)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

@@ -25,10 +25,12 @@
 #   8. sqlfmt runs, on PATH or in ~/.local/bin (WARN when it is absent or does not run)
 #   9. the employer terms file has a term (WARN when it is absent or empty; tests/test-public-tree.sh
 #      skips its employer check without it)
+#  10. the global git user.email is a GitHub noreply address (WARN when it is unset or another address;
+#      the fix shows the address of the signed-in gh user when gh-noreply-address.sh finds one)
 #
 # Tools used: dirname basename readlink grep jq gh git ssh-keygen claude sqlfmt, and the pinned bash (check 7,
-# by absolute path, run once with -c to print its major). ssh-keygen reads the passwd
-# home and ignores $HOME, so its call passes -f.
+# by absolute path, run once with -c to print its major). Check 10 also runs gh-noreply-address.sh,
+# which uses gh. ssh-keygen reads the passwd home and ignores $HOME, so its call passes -f.
 
 # shellcheck disable=SC2088 # "~" is literal text in the messages, never a path to expand
 set -u
@@ -302,6 +304,29 @@ elif ! grep -q '[^[:space:]]' "$terms_file" 2>/dev/null; then
 	warn "employer terms file (empty)" "$FIX_TERMS"
 else
 	ok "employer terms file"
+fi
+
+# ---- 10. global git email ---------------------------------------------------
+# The README (section "Install") sets user.email in the git config of the machine, and no other check
+# reads it. Without it, git builds the author from $USER@host or keeps a stale work address, in public
+# repos too. The check reads only the global config. A gap is a WARN, not missing: a work machine may
+# keep a work address on purpose.
+# The helper prints the noreply address of the signed-in gh user, or nothing. It runs through $BASH, so a
+# PATH that holds no bash or env still works.
+git_email="$(git config --global user.email 2>/dev/null)" || git_email=""
+# fix_email: print the fix command. The helper asks gh, so only a WARN calls it (an ok line needs no fix).
+fix_email() {
+	local derived
+	derived="$("$BASH" "$(dirname "${BASH_SOURCE[0]}")/gh-noreply-address.sh" 2>/dev/null)" || derived=""
+	printf 'git config --global user.email %s' "${derived:-<id>+<login>@users.noreply.github.com}"
+}
+NOREPLY_RE='^([0-9]+\+)?[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?@users\.noreply\.github\.com$'
+if [ -z "$git_email" ]; then
+	warn "git email (global user.email is unset)" "$(fix_email)"
+elif [[ "$git_email" =~ $NOREPLY_RE ]]; then
+	ok "git email $git_email"
+else
+	warn "git email ($git_email is not a GitHub noreply address)" "$(fix_email)"
 fi
 
 printf 'doctor: %s missing\n' "$MISSING"

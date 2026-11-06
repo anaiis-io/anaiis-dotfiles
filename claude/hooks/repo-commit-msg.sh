@@ -4,33 +4,45 @@
 # Repos call this single file via their .git/hooks/commit-msg. Git passes the
 # commit message file as argument 1.
 #
-# The hook checks the message with commit-msg-lint.sh. It checks only in a repo
-# that opts in with a .conventional-commits file in its working tree at the repo
-# root, because other repos use other commit conventions (decision D-005). The
-# file need not be tracked by git.
+# The hook runs two opt-in checks. Each has its own marker file in the working tree
+# at the repo root (the file need not be tracked by git), and each is independent:
+#   - .conventional-commits   runs commit-msg-lint.sh, which checks the message
+#     format. Other repos use other commit conventions (decision D-005).
+#   - .require-noreply-email  runs noreply-email-check.sh message, which rejects a
+#     trailer (Co-Authored-By, Signed-off-by, and so on) that lists an address that
+#     is not a GitHub noreply address.
+# The hook runs both checks that apply, then returns 1 if either failed, so the
+# user sees every problem at once. In a repo with neither marker it exits 0.
 #
-# The hook exits 0 at once when:
-#   - SKIP_COMMIT_LINT=1 is set,
-#   - the repo has no .conventional-commits file (or there is no repo root),
-#   - $HOME/.claude/scripts/commit-msg-lint.sh does not exist. Missing tooling
-#     must never block a commit.
-# Otherwise the hook returns the exit code of the validator.
+# A check is skipped when:
+#   - the lint: SKIP_COMMIT_LINT=1 is set, or $HOME/.claude/scripts/commit-msg-lint.sh
+#     does not exist,
+#   - the email check: SKIP_EMAIL_CHECK=1 is set (the script itself reads it), or
+#     $HOME/.claude/scripts/noreply-email-check.sh does not exist.
+# Missing tooling must never block a commit. SKIP_COMMIT_LINT does not skip the
+# email check, and SKIP_EMAIL_CHECK does not skip the lint.
 #
 # Stable path (repos reference this; never rename it):
 #   bash "$HOME/.claude/hooks/repo-commit-msg.sh" "$1"
 #
-# Bypass flag (for the user only):
+# Bypass flags (for the user only):
 #   SKIP_COMMIT_LINT=1 git commit  -- skip the message lint
+#   SKIP_EMAIL_CHECK=1 git commit  -- skip the noreply email check
 
 set -u
 
-[ "${SKIP_COMMIT_LINT:-0}" = "1" ] && exit 0
-
-# Outside a repo, root is empty and the marker test fails, so the hook exits 0.
+# Outside a repo, root is empty and each marker test fails, so the hook exits 0.
 root=$(git rev-parse --show-toplevel 2>/dev/null)
-[ -f "$root/.conventional-commits" ] || exit 0
+rc=0
 
 lint="$HOME/.claude/scripts/commit-msg-lint.sh"
-[ -f "$lint" ] || exit 0
+if [ "${SKIP_COMMIT_LINT:-0}" != "1" ] && [ -f "$root/.conventional-commits" ] && [ -f "$lint" ]; then
+	bash "$lint" "${1:-}" || rc=$?
+fi
 
-exec bash "$lint" "${1:-}"
+email_check="$HOME/.claude/scripts/noreply-email-check.sh"
+if [ -f "$root/.require-noreply-email" ] && [ -f "$email_check" ]; then
+	bash "$email_check" message "${1:-}" || rc=$?
+fi
+
+exit "$rc"

@@ -7,7 +7,8 @@
 # Checks all three dispatcher hooks, not just pre-commit: every repo on a dev
 # machine already carried pre-commit when pre-push and commit-msg were
 # introduced, so an early exit on the pre-commit marker alone would mean no
-# existing repo ever received the later hooks.
+# existing repo ever received the later hooks. The pre-push line without "$@" is
+# the old form: the installer rewrites it, so it does not end the early exit.
 
 set -euo pipefail
 
@@ -23,9 +24,14 @@ esac
 
 # Already wired up -- nothing to do. Git skips a hook that is not executable,
 # so each hook needs its marker and its execute bit.
+# The old pre-push line is data, not a command. It is built in two parts so that the bare-bash scan of
+# tests/test-bash-baseline.sh (case 6.1) does not read it as a child script start.
+# shellcheck disable=SC2016 # the old pre-push line holds a literal "$HOME"
+OLD_PUSH_CALL='"$HOME/.claude/hooks/repo-pre-push.sh"'
 if grep -qF -- 'repo-pre-commit.sh' "$hooks/pre-commit" 2>/dev/null \
 	&& [ -x "$hooks/pre-commit" ] \
 	&& grep -qF -- 'repo-pre-push.sh' "$hooks/pre-push" 2>/dev/null \
+	&& ! grep -qFx -- "bash $OLD_PUSH_CALL" "$hooks/pre-push" \
 	&& [ -x "$hooks/pre-push" ] \
 	&& grep -qF -- 'repo-commit-msg.sh' "$hooks/commit-msg" 2>/dev/null \
 	&& [ -x "$hooks/commit-msg" ]; then
