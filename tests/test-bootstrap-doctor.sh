@@ -61,19 +61,26 @@ if [ -n "${COV:-}" ]; then
 fi
 
 # ---- Tools on PATH ----------------------------------------------------------
-# The doctor may call only: dirname basename readlink grep jq gh ssh-keygen claude sqlfmt. Each PATH folder
+# The doctor may call only: dirname basename readlink grep jq gh git ssh-keygen claude sqlfmt. Each PATH folder
 # below links just those that a case needs. Without gh, jq, or claude on PATH, the doctor sees them as absent.
 mkdir -p "$TMPD/stub"
 cat >"$TMPD/stub/gh" <<'EOF'
 #!/bin/sh
 # POSIX sh, not env bash: the doctor runs with a PATH that holds no env and no bash.
-# Accepts exactly: config get git_protocol. STUB_PROTOCOL empty means the key is unset.
-[ "$*" = "config get git_protocol" ] || {
-	echo "stub gh: unexpected arguments: $*" >&2
-	exit 64
-}
-[ -n "${STUB_PROTOCOL:-}" ] || exit 1
-echo "$STUB_PROTOCOL"
+# Accepts exactly: config get git_protocol --host github.com (the value for github.com) and
+# config get git_protocol (the global value). STUB_PROTOCOL is the github.com value; empty means the key
+# is unset. STUB_GLOBAL_PROTOCOL is the global value (default https).
+case "$*" in
+	"config get git_protocol --host github.com")
+		[ -n "${STUB_PROTOCOL:-}" ] || exit 1
+		echo "$STUB_PROTOCOL"
+		;;
+	"config get git_protocol") echo "${STUB_GLOBAL_PROTOCOL:-https}" ;;
+	*)
+		echo "stub gh: unexpected arguments: $*" >&2
+		exit 64
+		;;
+esac
 EOF
 chmod +x "$TMPD/stub/gh"
 cat >"$TMPD/stub/claude" <<'EOF'
@@ -126,11 +133,11 @@ make_bin() {
 		ln -s "$real" "$dir/$tool"
 	done
 }
-make_bin "$TMPD/bin" dirname basename readlink grep jq ssh-keygen gh claude sqlfmt
-make_bin "$TMPD/bin-nogh" dirname basename readlink grep jq ssh-keygen claude sqlfmt
-make_bin "$TMPD/bin-nojq" dirname basename readlink grep ssh-keygen gh claude sqlfmt
-make_bin "$TMPD/bin-noclaude" dirname basename readlink grep jq ssh-keygen gh sqlfmt
-make_bin "$TMPD/bin-nosqlfmt" dirname basename readlink grep jq ssh-keygen gh claude
+make_bin "$TMPD/bin" dirname basename readlink grep git jq ssh-keygen gh claude sqlfmt
+make_bin "$TMPD/bin-nogh" dirname basename readlink grep git jq ssh-keygen claude sqlfmt
+make_bin "$TMPD/bin-nojq" dirname basename readlink grep git ssh-keygen gh claude sqlfmt
+make_bin "$TMPD/bin-noclaude" dirname basename readlink grep git jq ssh-keygen gh sqlfmt
+make_bin "$TMPD/bin-nosqlfmt" dirname basename readlink grep git jq ssh-keygen gh claude
 
 # ---- Fixture HOME -----------------------------------------------------------
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$TMPD/hostkey" >/dev/null
@@ -159,6 +166,8 @@ build_home() {
 	done
 	printf '%s\n' "$SETTINGS_JSON" >"$repo/claude/settings.json"
 	printf '{}\n' >"$repo/claude/keybindings.json"
+	git init -q "$repo"
+	git -C "$repo" remote add origin https://github.com/anaiis-io/anaiis-dotfiles.git
 	ln -s "$repo" "$h/anaiis-dotfiles"
 	for name in $NAMES; do
 		ln -s "$h/anaiis-dotfiles/claude/$name" "$h/.claude/$name"
@@ -173,11 +182,12 @@ build_home() {
 }
 
 # doctor <home>: run the script. OUT holds stdout and stderr, RC the exit code.
-# PROTO (default ssh) sets the stub gh answer; BIN_DIR (default $TMPD/bin) sets PATH.
+# PROTO (default ssh) sets the stub gh answer for github.com. PROTO_GLOBAL (default https) sets the
+# global answer. BIN_DIR (default $TMPD/bin) sets PATH.
 # CLAUDE_V (default: a new version) sets the line that the stub claude prints for --version.
 # SQLFMT_V (default: version 0.32.0) sets the line that the stub sqlfmt prints. Empty makes it fail.
 doctor() {
-	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" \
+	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" STUB_GLOBAL_PROTOCOL="${PROTO_GLOBAL-https}" \
 		STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
 	RC=$?
 }
@@ -377,24 +387,71 @@ BIN_DIR="$TMPD/bin-nojq" expect_one "4.5 jq is not installed" "$H" "MISSING jq (
 echo "--- 5. GitHub host key"
 H="$(build_home)"
 rm "$H/.ssh/known_hosts"
-expect_one "5.1 ssh protocol and no host key" "$H" "MISSING github.com host key (~/.ssh/known_hosts): $FIX_KEYS"
+expect_one "5.1 ssh protocol and no host key" "$H" "MISSING github.com host key (~/.ssh/known_hosts; gh protocol ssh): $FIX_KEYS"
 H="$(build_home)"
 printf 'example.org %s\n' "$KEYTEXT" >"$H/.ssh/known_hosts"
 expect_one "5.2 ssh protocol and a known_hosts file without github.com" "$H" \
-	"MISSING github.com host key (~/.ssh/known_hosts): $FIX_KEYS"
+	"MISSING github.com host key (~/.ssh/known_hosts; gh protocol ssh): $FIX_KEYS"
 H="$(build_home)"
 rm "$H/.ssh/known_hosts"
 PROTO=https doctor "$H"
-assert_eq "5.3 https protocol: exit 0 without a host key" 0 "$RC"
-assert_eq "5.4 https protocol: the ok line says it is not needed" 1 \
-	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol is https)')"
+assert_eq "5.3 https protocol and https origin: exit 0 without a host key" 0 "$RC"
+assert_eq "5.4 https protocol and https origin: the ok line says it is not needed" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin https)')"
 PROTO="" doctor "$H"
 assert_eq "5.5 unset protocol: exit 0" 0 "$RC"
 assert_eq "5.6 unset protocol: the ok line says so" 1 \
-	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol is unset)')"
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol unset, origin https)')"
 BIN_DIR="$TMPD/bin-nogh" doctor "$H"
 assert_eq "5.7 no gh: exit 0 without a host key" 0 "$RC"
 assert_eq "5.8 no gh: the ok line says so" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh not found)')"
+# Issue 16: an SSH origin needs the host key even when the gh value for github.com is https or unset.
+ORIGIN_SSH='git@github.com:anaiis-io/anaiis-dotfiles.git'
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote set-url origin "$ORIGIN_SSH"
+PROTO=https expect_one "5.9 https gh value, ssh origin, no host key" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; origin remote ssh): $FIX_KEYS"
+PROTO="" expect_one "5.10 unset gh value, ssh origin, no host key" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; origin remote ssh): $FIX_KEYS"
+expect_one "5.11 ssh gh value and ssh origin: the line names both" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; gh protocol ssh, origin remote ssh): $FIX_KEYS"
+H="$(build_home)"
+git -C "$H/anaiis-dotfiles" remote set-url origin "$ORIGIN_SSH"
+PROTO=https doctor "$H"
+assert_eq "5.12 ssh origin and a host key: exit 0" 0 "$RC"
+assert_eq "5.13 ssh origin and a host key: the ok line names the source" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (origin remote ssh)$')"
+H="$(build_home)"
+doctor "$H"
+assert_eq "5.14 ssh gh value and a host key: the ok line names the source" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (gh protocol ssh)$')"
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote set-url origin 'ssh://git@github.com/anaiis-io/anaiis-dotfiles.git'
+PROTO=https expect_one "5.15 an ssh:// origin counts as ssh" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; origin remote ssh): $FIX_KEYS"
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote remove origin
+PROTO=https doctor "$H"
+assert_eq "5.16 no origin remote and https gh value: exit 0" 0 "$RC"
+assert_eq "5.17 no origin remote: the ok line says so" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin none)')"
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote set-url origin /srv/git/anaiis-dotfiles.git
+PROTO=https doctor "$H"
+assert_eq "5.18 an origin that is not a GitHub URL does not need the github.com key: exit 0" 0 "$RC"
+assert_eq "5.19 a non-GitHub origin: the ok line says other" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin other)')"
+# The gh value for github.com wins over the global value, as gh itself resolves it.
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+PROTO=https PROTO_GLOBAL=ssh doctor "$H"
+assert_eq "5.20 global ssh but github.com https: exit 0" 0 "$RC"
+assert_eq "5.21 global ssh but github.com https: not needed" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin https)')"
 
 echo "--- 6. Claude Code version"
 # onFailure support starts at 2.1.295. Each case below fails a different wrong comparison: a lexical
