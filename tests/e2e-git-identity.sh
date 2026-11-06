@@ -4,7 +4,7 @@
 # Why this matters: an env value in settings.json reaches every command of the Bash tool, and git reads
 # GIT_AUTHOR_* and GIT_COMMITTER_* before any git config. The dotfiles once set the identity there, so no
 # machine and no repo could use its own. Now the dotfiles set no identity, and each machine sets it in its
-# git config (README, step 6). tests/test-rules-integrity.sh (section 7) checks the file. This suite checks
+# git config (README, section "Install", step 4). tests/test-rules-integrity.sh (section 7) checks the file. This suite checks
 # what a live session does with it.
 #
 # Method: each case starts `claude -p` in a temp git repo whose local config sets a test noreply address,
