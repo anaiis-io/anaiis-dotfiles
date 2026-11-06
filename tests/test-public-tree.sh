@@ -44,9 +44,11 @@ EMAIL_RE='[][A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 # One extended regular expression per line. Each must match the whole address.
 # n@<name>.md: the n of a \n escape before an @<name>.md import line, not an address. A test writes
 # one. The entry is a pattern: the test that guards a removed tool forbids its name here.
+# noreply@anthropic.com: the public no-reply address that a trailer may list (noreply-email-check.sh).
 # octo@...evil.io: the look-alike fixture of the email guard test, kept exact on purpose.
 EMAIL_ALLOW='([0-9]+\+)?[A-Za-z0-9-]+(\[bot\])?@users\.noreply\.github\.com
 noreply@github\.com
+noreply@anthropic\.com
 git@github\.com
 [^@]+@example\.com
 test@test\.com

@@ -49,17 +49,28 @@ if [ -n "${COV:-}" ]; then
 	cov_begin "$TMPD/cov.log"
 fi
 
-# Stub gh: accepts exactly `config get git_protocol` and answers https. Any other call fails.
+# Stub gh: accepts exactly `config get git_protocol --host github.com` and answers https. Any other call fails.
 mkdir -p "$TMPD/stub"
 cat >"$TMPD/stub/gh" <<'EOF'
 #!/bin/sh
-[ "$*" = "config get git_protocol" ] || {
+[ "$*" = "config get git_protocol --host github.com" ] || {
 	echo "stub gh: unexpected arguments: $*" >&2
 	exit 64
 }
 echo https
 EOF
 chmod +x "$TMPD/stub/gh"
+
+# Stub git: answers `remote get-url origin` with an https URL, so the host key rule never reads the real
+# origin of the clone under test (the live clone may use SSH). Every other call goes to the real git.
+cat >"$TMPD/stub/git" <<EOF
+#!/bin/sh
+case "\$*" in
+	*" remote get-url origin") echo https://github.com/anaiis-io/anaiis-dotfiles.git ;;
+	*) exec "$(command -v git)" "\$@" ;;
+esac
+EOF
+chmod +x "$TMPD/stub/git"
 
 # Stub claude: accepts exactly `--version` and answers a version above the doctor minimum. Without it,
 # the doctor would run the real claude, and an old install on the test machine would add a MISSING line.
@@ -109,7 +120,7 @@ assert_eq "1.5 the shell config exists" yes "$([ -f "$H/.bashrc" ] && [ -f "$H/.
 assert_eq "1.6 one PATH line in .bashrc" 1 "$(grep -c 'anaiis-dotfiles/bin' "$H/.bashrc")"
 assert_eq "1.7 one shared.bash source line in .bashrc" 1 "$(grep -c 'anaiis-dotfiles/bash/shared.bash' "$H/.bashrc")"
 assert_eq "1.8 gh protocol https: the host key step skips" 1 \
-	"$(printf '%s\n' "$FIRST_OUT" | grep -c '^  skip  gh git protocol is "https"')"
+	"$(printf '%s\n' "$FIRST_OUT" | grep -c '^  skip  no host key needed: gh protocol for github.com is "https", origin remote is https\.')"
 assert_eq "1.9 gh protocol https: no .ssh folder is created" no "$([ -e "$H/.ssh" ] && echo yes || echo no)"
 assert_eq "1.10 no CLAUDE.md link is created (rules/context.md replaces it)" no \
 	"$([ -L "$H/.claude/CLAUDE.md" ] || [ -e "$H/.claude/CLAUDE.md" ] && echo yes || echo no)"
@@ -157,7 +168,7 @@ assert_eq "4.4 ok for all eight links" 8 "$(okl '^ok ~/.claude/[a-z.]* -> ~/anai
 assert_eq "4.12 ok for the local memory folder" 1 "$(okl '^ok ~/.claude/memory (local folder)$')"
 assert_eq "4.5 one MISSING line per enabled plugin" "$ENABLED" "$(okl '^MISSING plugin ')"
 assert_eq "4.6 no other MISSING line (check 7 adds GAP lines)" "$((ENABLED + GAP))" "$(okl '^MISSING ')"
-assert_eq "4.7 the host key is not needed for https" 1 "$(okl '^ok github.com host key (not needed: gh protocol is https)$')"
+assert_eq "4.7 the host key is not needed for https" 1 "$(okl '^ok github.com host key (not needed: gh protocol https, origin https)$')"
 assert_eq "4.8 summary counts the missing plugins and the check 7 gap" "doctor: $((ENABLED + GAP)) missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
 if [ "$((ENABLED + GAP))" -gt 0 ]; then WANT_RC=1; else WANT_RC=0; fi
 assert_eq "4.9 exit code follows the missing count" "$WANT_RC" "$RC"

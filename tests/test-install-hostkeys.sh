@@ -76,16 +76,21 @@ jq -n --arg k1 "$(pubkey ed)" --arg k2 "$(pubkey ec)" --arg k3 "$(pubkey other)"
 	'{ssh_keys: [$k1, $k2, $k3], ssh_key_fingerprints: {SHA256_ED25519: $f1, SHA256_ECDSA: $f2}}' >"$META_EXTRA"
 
 # ---- Stub gh ----------------------------------------------------------------
-# Accepts exactly: config get git_protocol; api meta --jq .ssh_keys[]; api meta --jq .ssh_key_fingerprints[].
-# STUB_PROTOCOL empty means the config key is unset (exit 1). STUB_FAIL=1 makes every api call fail.
+# Accepts exactly: config get git_protocol --host github.com (the value for github.com);
+# config get git_protocol (the global value); api meta --jq .ssh_keys[]; api meta --jq .ssh_key_fingerprints[].
+# STUB_PROTOCOL is the github.com value; empty means the key is unset (exit 1).
+# STUB_GLOBAL_PROTOCOL is the global value (default https). STUB_FAIL=1 makes every api call fail.
 STUB="$TMPD/stub"
 mkdir -p "$STUB"
 cat >"$STUB/gh" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-	"config get git_protocol")
+	"config get git_protocol --host github.com")
 		[ -n "${STUB_PROTOCOL:-}" ] || exit 1
 		echo "$STUB_PROTOCOL"
+		;;
+	"config get git_protocol")
+		echo "${STUB_GLOBAL_PROTOCOL:-https}"
 		;;
 	"api meta --jq .ssh_keys[]" | "api meta --jq .ssh_key_fingerprints[]")
 		[ -z "${STUB_FAIL:-}" ] || {
@@ -105,11 +110,27 @@ chmod +x "$STUB/gh"
 # new_home: an empty HOME with no .ssh folder.
 new_home() { mktemp -d "$TMPD/home.XXXXXX"; }
 
+# The installer reads the origin remote of the repo that it sits in. The real checkout has whatever origin
+# the machine uses, so each run uses a copy of the installer inside a throwaway repo with a known origin.
+# make_repo <name> [origin-url]: print the path of the installer copy. No URL means no origin remote.
+make_repo() {
+	mkdir -p "$TMPD/repo-$1"
+	git init -q "$TMPD/repo-$1"
+	cp "$INSTALL" "$TMPD/repo-$1/install.sh"
+	if [ -n "${2:-}" ]; then git -C "$TMPD/repo-$1" remote add origin "$2"; fi
+	printf '%s\n' "$TMPD/repo-$1/install.sh"
+}
+INSTALL_HTTPS="$(make_repo https https://github.com/example/dotfiles.git)"
+INSTALL_SSH="$(make_repo ssh git@github.com:example/dotfiles.git)"
+INSTALL_SSHURL="$(make_repo sshurl ssh://git@github.com/example/dotfiles.git)"
+INSTALL_NOORIGIN="$(make_repo noorigin)"
+
 # run_keys <home>: run the mode with the stub first on PATH. OUT holds all output; RC the exit code.
-# Variables PROTO (default ssh), META_FILE (default $META), and GH_FAIL tune the stub.
+# Variables PROTO (github.com value, default ssh), PROTO_GLOBAL (global value, default https), META_FILE
+# (default $META), GH_FAIL, and RUN_INSTALL (default the https-origin copy) tune the run.
 run_keys() {
-	OUT="$(HOME="$1" PATH="$STUB:$PATH" STUB_PROTOCOL="${PROTO-ssh}" STUB_META="${META_FILE:-$META}" \
-		STUB_FAIL="${GH_FAIL:-}" "$BASH" "$INSTALL" --hostkeys-only 2>&1)"
+	OUT="$(HOME="$1" PATH="$STUB:$PATH" STUB_PROTOCOL="${PROTO-ssh}" STUB_GLOBAL_PROTOCOL="${PROTO_GLOBAL:-https}" \
+		STUB_META="${META_FILE:-$META}" STUB_FAIL="${GH_FAIL:-}" "$BASH" "${RUN_INSTALL:-$INSTALL_HTTPS}" --hostkeys-only 2>&1)"
 	RC=$?
 }
 
@@ -168,10 +189,12 @@ H5="$(new_home)"
 PROTO=https run_keys "$H5"
 assert_eq "5.1 exit code is 0" 0 "$RC"
 assert_eq "5.2 nothing is created" no "$(yesno test -e "$H5/.ssh")"
-assert_eq "5.3 the output names the protocol" 1 "$(printf '%s\n' "$OUT" | grep -c '^  skip  gh git protocol is "https"')"
+assert_eq "5.3 the output names both signals" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^  skip  no host key needed: gh protocol for github.com is "https", origin remote is https')"
 H5B="$(new_home)"
 PROTO="" run_keys "$H5B"
 assert_eq "5.4 an unset protocol also skips" no "$(yesno test -e "$H5B/.ssh")"
+assert_eq "5.5 an unset protocol is named as unset" 1 "$(printf '%s\n' "$OUT" | grep -c 'gh protocol for github.com is "unset"')"
 
 echo "--- 6. gh is not installed: skip"
 H6="$(new_home)"
@@ -212,6 +235,30 @@ RC=$?
 assert_eq "10.1 an unknown mode exits 2" 2 "$RC"
 assert_eq "10.2 the usage line lists --hostkeys-only" 1 "$(printf '%s\n' "$OUT" | grep -c -e '--hostkeys-only')"
 assert_eq "10.3 the full install calls wire_github_hostkeys once" 1 "$(grep -c '^wire_github_hostkeys$' "$INSTALL")"
+
+# The machine needs the key when gh uses SSH for github.com, or when the origin remote of the repo is an
+# SSH URL. gh keeps a global value and one for the host. The host value wins (issue 16): a global https
+# with a github.com ssh value still means SSH. Before the fix the installer read only the global value.
+echo "--- 11. the signals that make a host key necessary"
+H11A="$(new_home)"
+PROTO=ssh PROTO_GLOBAL=https run_keys "$H11A"
+assert_eq "11.1 global https, github.com ssh: the keys are written" 2 "$(keys_in "$H11A/.ssh/known_hosts")"
+H11B="$(new_home)"
+PROTO=https PROTO_GLOBAL=ssh run_keys "$H11B"
+assert_eq "11.2 global ssh, github.com https, https origin: nothing is written" no "$(yesno test -e "$H11B/.ssh")"
+H11C="$(new_home)"
+PROTO=https RUN_INSTALL="$INSTALL_SSH" run_keys "$H11C"
+assert_eq "11.3 github.com https, origin git@github.com: the keys are written" 2 "$(keys_in "$H11C/.ssh/known_hosts")"
+H11D="$(new_home)"
+PROTO=https RUN_INSTALL="$INSTALL_SSHURL" run_keys "$H11D"
+assert_eq "11.4 github.com https, origin ssh://git@github.com: the keys are written" 2 "$(keys_in "$H11D/.ssh/known_hosts")"
+H11E="$(new_home)"
+PROTO=https RUN_INSTALL="$INSTALL_NOORIGIN" run_keys "$H11E"
+assert_eq "11.5 github.com https and no origin remote: nothing is written" no "$(yesno test -e "$H11E/.ssh")"
+assert_eq "11.6 the skip line says there is no origin" 1 "$(printf '%s\n' "$OUT" | grep -c 'origin remote is none')"
+H11F="$(new_home)"
+PROTO=https RUN_INSTALL="$INSTALL_SSH" META_FILE="$META_BAD" run_keys "$H11F"
+assert_eq "11.7 an SSH origin does not bypass the fingerprint check" no "$(yesno test -e "$H11F/.ssh")"
 
 if [ -n "${COV:-}" ]; then
 	cov_end
