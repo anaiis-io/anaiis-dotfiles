@@ -440,9 +440,9 @@ assert_eq "5.17 no origin remote: the ok line says so" 1 \
 	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin none)')"
 H="$(build_home)"
 rm "$H/.ssh/known_hosts"
-git -C "$H/anaiis-dotfiles" remote set-url origin 'git@gitlab.com:anaiis-io/anaiis-dotfiles.git'
+git -C "$H/anaiis-dotfiles" remote set-url origin /srv/git/anaiis-dotfiles.git
 PROTO=https doctor "$H"
-assert_eq "5.18 a non-GitHub ssh origin does not need the github.com key: exit 0" 0 "$RC"
+assert_eq "5.18 an origin that is not a GitHub URL does not need the github.com key: exit 0" 0 "$RC"
 assert_eq "5.19 a non-GitHub origin: the ok line says other" 1 \
 	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin other)')"
 # The gh value for github.com wins over the global value, as gh itself resolves it.
