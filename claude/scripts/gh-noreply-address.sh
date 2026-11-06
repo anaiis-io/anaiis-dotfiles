@@ -5,10 +5,12 @@
 #
 # Prints <id>+<login>@users.noreply.github.com and exits 0. Prints nothing, and still exits 0, when gh
 # is absent, not signed in, offline, or answers with anything that is not that address.
-# The reject text of noreply-email-check.sh and the warning of bootstrap-doctor.sh (check 9) call this
+# The reject text of noreply-email-check.sh and the warning of bootstrap-doctor.sh (check 10) call this
 # script, so the command that derives the address has one home.
 #
 # Read-only: one GET of /user. The script needs no tool except gh and runs on bash 3.2.
+# shortcut: no time limit of its own, because a limit needs sleep and mktemp and the doctor runs with a
+# short tool list. gh stops a dead connection by itself. Add a limit when a hang is reported.
 
 ADDRESS_RE='^[0-9]+\+[A-Za-z0-9][A-Za-z0-9-]*@users\.noreply\.github\.com$'
 

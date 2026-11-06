@@ -88,6 +88,7 @@ case "$*" in
 		exit 0
 		;;
 	'api user --jq "\(.id)+\(.login)@users.noreply.github.com"')
+		[ -z "${STUB_GH_LOG:-}" ] || echo "$*" >>"$STUB_GH_LOG"
 		[ -n "${STUB_GH_USER:-}" ] || exit 4
 		echo "$STUB_GH_USER"
 		exit 0
@@ -207,12 +208,13 @@ build_home() {
 # CLAUDE_V (default: a new version) sets the line that the stub claude prints for --version.
 # SQLFMT_V (default: version 0.32.0) sets the line that the stub sqlfmt prints. Empty makes it fail.
 # GH_USER (default empty) sets the address that the stub gh prints for `api user`. Empty means not signed in.
+# GH_LOG (default empty) names a file where the stub gh appends one line for each `api user` call.
 # TERMS_ENV and TERMS_XDG (default empty) set EMPLOYER_TERMS_FILE and XDG_CONFIG_HOME, so the real
 # environment of the machine never reaches the doctor.
 doctor() {
 	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" STUB_GLOBAL_PROTOCOL="${PROTO_GLOBAL-https}" \
 		EMPLOYER_TERMS_FILE="${TERMS_ENV-}" XDG_CONFIG_HOME="${TERMS_XDG-}" \
-		STUB_GH_USER="${GH_USER-}" STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
+		STUB_GH_USER="${GH_USER-}" STUB_GH_LOG="${GH_LOG-}" STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
 
 	RC=$?
 }
@@ -691,6 +693,12 @@ H="$(build_home)"
 printf '[user]\n\temail =\n' >"$H/.gitconfig"
 doctor "$H"
 assert_eq "12.17 an empty value counts as unset" "WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
+# The helper asks gh for the network. The ok branch has no use for the answer, so it never calls gh.
+rm -f "$TMPD/gh-api-user.log"
+GH_LOG="$TMPD/gh-api-user.log" doctor "$H0"
+assert_eq "12.18 a noreply address: the doctor does not call gh api user" 0 "$({ cat "$TMPD/gh-api-user.log" 2>/dev/null || true; } | grep -c 'api user' || true)"
+GH_LOG="$TMPD/gh-api-user.log" doctor "$H"
+assert_eq "12.19 an empty address: the doctor calls gh api user once, for the fix text" 1 "$({ cat "$TMPD/gh-api-user.log" 2>/dev/null || true; } | grep -c 'api user' || true)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

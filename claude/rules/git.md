@@ -136,7 +136,7 @@ A PR title follows the subject grammar and ends with the ticket in brackets (see
 - An environment can set an agent identity on purpose, such as `noreply@anthropic.com` in a cloud container. Claude does not override it. Claude asks the user.
 - When the check rejects a trailer, Claude removes the trailer line or uses a noreply address in it.
 - In push mode the reject lists commits that already exist. A config change does not change them. Claude never amends or rewrites them on its own. Claude asks the user, who decides about the history rewrite.
-- Limit: `--no-verify` skips both hooks. GitHub's GH007 then blocks only a private address of the GitHub account, not a work address.
+- Limit: `--no-verify` skips these hooks. GitHub's GH007 then blocks only a private address of the GitHub account, not a work address.
 - `SKIP_COMMIT_LINT=1 git commit` bypasses the lint. Only the user uses it. Claude never uses it.
 
 ### Subject examples

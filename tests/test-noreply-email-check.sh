@@ -529,6 +529,78 @@ try_commit "$T12" git commit -q --allow-empty -m "$(printf 'feat: x\n\nCo-Author
 assert_eq "12.17 a trailer reject says how to fix the trailer, and not the identity" "1 0" \
 	"$(grep -c 'Remove the trailer line' "$WORK/last.out") $(grep -c 'git config user.email' "$WORK/last.out")"
 
+echo "=== 13. review findings: bytes, signatures, credentials, and merges ==="
+# 13a. A trailer line that is not valid UTF-8 must not hide its address. BSD grep finds no match on such a
+# line in a UTF-8 locale, and a fail-open `|| true` then passed the commit.
+T13="$WORK/review13"
+make_repo "$T13" 1
+printf 'feat: x\n\nbody\n\nCo-authored-by: Zo\353 <bad@work.com>\n' >"$WORK/latin.msg"
+(cd "$T13" && LC_ALL=en_US.UTF-8 HOME="$TMP_HOME" bash "$REPO_DIR/claude/hooks/repo-commit-msg.sh" "$WORK/latin.msg") >"$WORK/last.out" 2>&1
+assert_eq "13.1 message mode: an invalid UTF-8 trailer line is still checked (UTF-8 locale)" "1 1" \
+	"$? $(grep -cF -- '"bad@work.com"' "$WORK/last.out")"
+T13A="$(git -C "$T13" rev-parse HEAD)"
+T13TREE="$(git -C "$T13" rev-parse 'HEAD^{tree}')"
+# A commit whose header names an encoding that git cannot convert keeps its raw bytes in git log.
+ENC_OBJ="$(printf 'tree %s\nparent %s\nauthor Octo <%s> 1700000000 +0000\ncommitter Octo <%s> 1700000000 +0000\nencoding bogus-enc\n\nfeat: enc\n\nCo-authored-by: Zo\353 <bad@work.com>\n' \
+	"$T13TREE" "$T13A" "$NR" "$NR" | git -C "$T13" hash-object -t commit -w --stdin)"
+assert_eq "13.2 push mode: an invalid UTF-8 trailer line is still checked (UTF-8 locale)" "1 1" \
+	"$(LC_ALL=en_US.UTF-8 run_push "$T13" "refs/heads/main $ENC_OBJ refs/heads/main $T13A") $(grep -cF -- '"bad@work.com"' "$WORK/last.out")"
+
+# 13b. log.showSignature prints gpg text before each commit. The scan must still read the commit.
+mkdir -p "$WORK/gpgstub"
+cat >"$WORK/gpgstub/gpg" <<'STUB'
+#!/bin/sh
+echo '[GNUPG:] NEWSIG'
+echo '[GNUPG:] GOODSIG 0123456789ABCDEF Me <me@work.example.com>'
+echo '[GNUPG:] VALIDSIG 0123456789ABCDEF 2023-11-14 1700000000 0 4 0 1 8 00 0123456789ABCDEF'
+echo 'gpg: Good signature from "Me <me@work.example.com>"' >&2
+exit 0
+STUB
+chmod +x "$WORK/gpgstub/gpg"
+SIG_OBJ="$(printf 'tree %s\nparent %s\nauthor Octo <%s> 1700000000 +0000\ncommitter Octo <%s> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n fakesig\n -----END PGP SIGNATURE-----\n\nfeat: signed\n' \
+	"$T13TREE" "$T13A" "$NR" "$NR" | git -C "$T13" hash-object -t commit -w --stdin)"
+git -C "$T13" config log.showSignature true
+git -C "$T13" config gpg.program "$WORK/gpgstub/gpg"
+assert_eq "13.3 log.showSignature=true: a signed commit with noreply addresses passes the push check" 0 \
+	"$(run_push "$T13" "refs/heads/main $SIG_OBJ refs/heads/main $T13A")"
+assert_eq "13.4 log.showSignature=true: the gpg text is not read as a trailer or as a header" 0 \
+	"$(grep -c 'unbound variable\|me@work.example.com' "$WORK/last.out")"
+git -C "$T13" config --unset log.showSignature
+git -C "$T13" config --unset gpg.program
+
+# 13c. A remote URL can hold credentials. The text of a failed listing must not print them.
+CRED_URL='https://deploy:ghp_SECRETTOKEN123@127.0.0.1:1/x/y.git'
+assert_eq "13.5 a destination that cannot be listed: the check scans everything and accepts a clean history" 0 \
+	"$(NOREPLY_LS_REMOTE_TIMEOUT=5 run_push "$T13" "refs/heads/main $T13A refs/heads/new $ZERO" origin "$CRED_URL")"
+assert_eq "13.6 the text names the host" 1 "$(grep -c '127.0.0.1:1' "$WORK/last.out")"
+assert_eq "13.7 the text never holds the credentials" 0 "$(grep -c 'SECRETTOKEN123\|deploy:' "$WORK/last.out")"
+
+# 13d. A merge brings history that the destination already holds into a branch it also holds. The old tip
+# of the branch is known, so the check read only that tip, and the merged-in commit looked new.
+M13="$WORK/merge13"
+make_repo "$M13" 1
+M13BASE="$(git -C "$M13" rev-parse HEAD)"
+git -C "$M13" checkout -q -b old1
+try_commit "$M13" SKIP_EMAIL_CHECK=1 GIT_AUTHOR_EMAIL="$BAD" git commit -q --allow-empty -m legacy >/dev/null
+M13LEG="$(git -C "$M13" rev-parse HEAD)"
+git -C "$M13" checkout -q -b feat7 "$M13BASE"
+try_commit "$M13" git commit -q --allow-empty -m c2 >/dev/null
+M13C2="$(git -C "$M13" rev-parse HEAD)"
+new_bare "$WORK/merge13.git"
+seed_dest "$M13" "$WORK/merge13.git" "$M13LEG" refs/heads/old1
+seed_dest "$M13" "$WORK/merge13.git" "$M13C2" refs/heads/feat7
+git -C "$M13" remote add origin "$WORK/merge13.git"
+(cd "$M13" && env HOME="$TMP_HOME" git merge -q --no-ff -m "merge old1" old1) >/dev/null 2>&1
+assert_eq "13.8 the merge commit exists and has the legacy commit as a parent" 1 \
+	"$(git -C "$M13" log -1 --format=%P | grep -c "$M13LEG")"
+assert_eq "13.9 a merge of history that the destination holds is accepted" accepted \
+	"$(try_push "$M13" origin feat7:refs/heads/feat7)"
+# The legacy commit must still be rejected for a destination that lacks it.
+new_bare "$WORK/merge13-other.git"
+seed_dest "$M13" "$WORK/merge13-other.git" "$M13C2" refs/heads/feat7
+assert_eq "13.10 the same merge is rejected for a destination that lacks the legacy commit" rejected \
+	"$(try_push "$M13" "$WORK/merge13-other.git" feat7:refs/heads/feat7)"
+
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
