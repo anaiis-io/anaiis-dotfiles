@@ -17,16 +17,19 @@
 # In checks 1 and 2 a line that starts with # does not count: the shell never reads it.
 # In check 2 the name must end at .bashrc: a line that sources only .bashrc.local does not count.
 #   4. each enabled plugin has a folder in ~/.claude/plugins/cache/
-#   5. when gh uses the ssh protocol, known_hosts holds a github.com key
+#   5. when gh uses the ssh protocol for github.com, or the origin remote of ~/anaiis-dotfiles is an
+#      SSH URL for github.com, known_hosts holds a github.com key
 #   6. when claude is on PATH, its version is at least 2.1.295 (onFailure support for PreToolUse guards)
 #   7. settings.json pins env.CLAUDE_CODE_SHELL to an executable bash whose major version is in
 #      APPROVED_BASH_MAJORS, and every command in it starts with ${CLAUDE_CODE_SHELL:-bash}
 #   8. sqlfmt runs, on PATH or in ~/.local/bin (WARN when it is absent or does not run)
-#   9. the global git user.email is a GitHub noreply address (WARN when it is unset or another address;
+#   9. the employer terms file has a term (WARN when it is absent or empty; tests/test-public-tree.sh
+#      skips its employer check without it)
+#  10. the global git user.email is a GitHub noreply address (WARN when it is unset or another address;
 #      the fix shows the address of the signed-in gh user when gh-noreply-address.sh finds one)
 #
-# Tools used: dirname basename readlink grep jq gh ssh-keygen claude sqlfmt git, and the pinned bash (check 7,
-# by absolute path, run once with -c to print its major). Check 9 also runs gh-noreply-address.sh,
+# Tools used: dirname basename readlink grep jq gh git ssh-keygen claude sqlfmt, and the pinned bash (check 7,
+# by absolute path, run once with -c to print its major). Check 10 also runs gh-noreply-address.sh,
 # which uses gh. ssh-keygen reads the passwd home and ignores $HOME, so its call passes -f.
 
 # shellcheck disable=SC2088 # "~" is literal text in the messages, never a path to expand
@@ -54,6 +57,7 @@ FIX_MAJOR='install an approved bash (brew install bash), or approve this major b
 # shellcheck disable=SC2016 # ${...} stays literal: the user pastes this text into settings.json
 FIX_PREFIX='start each command in ~/anaiis-dotfiles/claude/settings.json with ${CLAUDE_CODE_SHELL:-bash} (a bare bash follows PATH)'
 FIX_SQLFMT='uv tool install shandy-sqlfmt'
+FIX_TERMS='list one employer term per line in ~/.config/anaiis-dotfiles/employer-terms.txt, or set EMPLOYER_TERMS_FILE. Without terms, tests/test-public-tree.sh skips its employer check.'
 
 # phys <path>: print the physical path of an existing path, with every link resolved.
 phys() {
@@ -168,16 +172,28 @@ EOF
 fi
 
 # ---- 5. GitHub host key -----------------------------------------------------
+# The rule is the same as ssh_signals in install.sh. SSH is in use when the gh value for github.com is
+# ssh, or when the origin remote of the clone is an SSH URL for github.com. Change both together.
 if ! command -v gh >/dev/null 2>&1; then
 	ok "github.com host key (not needed: gh not found)"
 else
-	proto="$(gh config get git_protocol 2>/dev/null)" || proto=""
-	if [ "$proto" != "ssh" ]; then
-		ok "github.com host key (not needed: gh protocol is ${proto:-unset})"
+	proto="$(gh config get git_protocol --host github.com 2>/dev/null)" || proto=""
+	origin_url="$(git -C "$HOME/anaiis-dotfiles" remote get-url origin 2>/dev/null)" || origin_url=""
+	case "$origin_url" in
+		git@github.com:* | ssh://git@github.com/* | ssh://github.com/*) origin_kind=ssh ;;
+		https://* | http://*) origin_kind=https ;;
+		"") origin_kind=none ;;
+		*) origin_kind=other ;;
+	esac
+	reason=""
+	[ "$proto" = ssh ] && reason="gh protocol ssh"
+	[ "$origin_kind" = ssh ] && reason="${reason:+$reason, }origin remote ssh"
+	if [ -z "$reason" ]; then
+		ok "github.com host key (not needed: gh protocol ${proto:-unset}, origin $origin_kind)"
 	elif ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
-		ok "github.com host key"
+		ok "github.com host key ($reason)"
 	else
-		missing "github.com host key (~/.ssh/known_hosts)" "$FIX_KEYS"
+		missing "github.com host key (~/.ssh/known_hosts; $reason)" "$FIX_KEYS"
 	fi
 fi
 
@@ -277,10 +293,23 @@ else
 	esac
 fi
 
-# ---- 9. global git email ----------------------------------------------------
-# README step 6 sets user.email in the git config of the machine, and no other check reads it. Without it,
-# git builds the author from $USER@host or keeps a stale work address, in public repos too. The check reads
-# only the global config. A gap is a WARN, not missing: a work machine may keep a work address on purpose.
+# ---- 9. employer terms file -------------------------------------------------
+# tests/test-public-tree.sh scans the tracked tree for the terms in this file, and it skips the scan when
+# the file is absent or empty. The path rule is the same as in that suite. A gap is a WARN, not missing.
+# The doctor never prints a term.
+terms_file="${EMPLOYER_TERMS_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/anaiis-dotfiles/employer-terms.txt}"
+if [ ! -f "$terms_file" ]; then
+	warn "employer terms file (absent)" "$FIX_TERMS"
+elif ! grep -q '[^[:space:]]' "$terms_file" 2>/dev/null; then
+	warn "employer terms file (empty)" "$FIX_TERMS"
+else
+	ok "employer terms file"
+fi
+
+# ---- 10. global git email ---------------------------------------------------
+# The README (section "Install") sets user.email in the git config of the machine, and no other check
+# reads it. Without it, git builds the author from $USER@host or keeps a stale work address, in public
+# repos too. The check reads only the global config. A gap is a WARN, not missing: a work machine may keep a work address on purpose.
 # The helper prints the noreply address of the signed-in gh user, or nothing. It runs through $BASH, so a
 # PATH that holds no bash or env still works.
 git_email="$(git config --global user.email 2>/dev/null)" || git_email=""

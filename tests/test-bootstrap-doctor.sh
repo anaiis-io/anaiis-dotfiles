@@ -66,19 +66,25 @@ if [ -n "${COV:-}" ]; then
 fi
 
 # ---- Tools on PATH ----------------------------------------------------------
-# The doctor may call only: dirname basename readlink grep jq gh ssh-keygen claude sqlfmt git. Each PATH folder
+# The doctor may call only: dirname basename readlink grep jq gh git ssh-keygen claude sqlfmt. Each PATH folder
 # below links just those that a case needs. Without gh, jq, or claude on PATH, the doctor sees them as absent.
 mkdir -p "$TMPD/stub"
 cat >"$TMPD/stub/gh" <<'EOF'
 #!/bin/sh
 # POSIX sh, not env bash: the doctor runs with a PATH that holds no env and no bash.
-# Accepts exactly two calls. config get git_protocol: STUB_PROTOCOL empty means the key is unset.
-# api user --jq <the expression of gh-noreply-address.sh>: STUB_GH_USER is the address to print, and
-# empty makes the stub fail, like a gh that is not signed in.
+# Accepts exactly three calls. config get git_protocol --host github.com (the value for github.com) and
+# config get git_protocol (the global value): STUB_PROTOCOL is the github.com value, and empty means the
+# key is unset; STUB_GLOBAL_PROTOCOL is the global value (default https). api user --jq <the expression of
+# gh-noreply-address.sh>: STUB_GH_USER is the address to print, and empty makes the stub fail, like a gh
+# that is not signed in.
 case "$*" in
-	"config get git_protocol")
+	"config get git_protocol --host github.com")
 		[ -n "${STUB_PROTOCOL:-}" ] || exit 1
 		echo "$STUB_PROTOCOL"
+		exit 0
+		;;
+	"config get git_protocol")
+		echo "${STUB_GLOBAL_PROTOCOL:-https}"
 		exit 0
 		;;
 	'api user --jq "\(.id)+\(.login)@users.noreply.github.com"')
@@ -141,15 +147,17 @@ make_bin() {
 		ln -s "$real" "$dir/$tool"
 	done
 }
-make_bin "$TMPD/bin" git dirname basename readlink grep jq ssh-keygen gh claude sqlfmt
-make_bin "$TMPD/bin-nogh" git dirname basename readlink grep jq ssh-keygen claude sqlfmt
-make_bin "$TMPD/bin-nojq" git dirname basename readlink grep ssh-keygen gh claude sqlfmt
-make_bin "$TMPD/bin-noclaude" git dirname basename readlink grep jq ssh-keygen gh sqlfmt
-make_bin "$TMPD/bin-nosqlfmt" git dirname basename readlink grep jq ssh-keygen gh claude
+make_bin "$TMPD/bin" dirname basename readlink grep git jq ssh-keygen gh claude sqlfmt
+make_bin "$TMPD/bin-nogh" dirname basename readlink grep git jq ssh-keygen claude sqlfmt
+make_bin "$TMPD/bin-nojq" dirname basename readlink grep git ssh-keygen gh claude sqlfmt
+make_bin "$TMPD/bin-noclaude" dirname basename readlink grep git jq ssh-keygen gh sqlfmt
+make_bin "$TMPD/bin-nosqlfmt" dirname basename readlink grep git jq ssh-keygen gh claude
 
 # ---- Fixture HOME -----------------------------------------------------------
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$TMPD/hostkey" >/dev/null
 KEYTEXT="$(awk '{print $1, $2}' "$TMPD/hostkey.pub")"
+# The one term in the fixture terms file. The doctor must never print it.
+TERM_SECRET='zz-fixture-term'
 # A healthy settings.json: two enabled plugins and one disabled, a pin to the stub bash, and two
 # commands (a hook and the status line) that start with the pin prefix.
 STUB_PIN="$TMPD/stub/bash"
@@ -175,6 +183,8 @@ build_home() {
 	done
 	printf '%s\n' "$SETTINGS_JSON" >"$repo/claude/settings.json"
 	printf '{}\n' >"$repo/claude/keybindings.json"
+	git init -q "$repo"
+	git -C "$repo" remote add origin https://github.com/anaiis-io/anaiis-dotfiles.git
 	ln -s "$repo" "$h/anaiis-dotfiles"
 	for name in $NAMES; do
 		ln -s "$h/anaiis-dotfiles/claude/$name" "$h/.claude/$name"
@@ -186,17 +196,24 @@ build_home() {
 	printf '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >"$h/.bash_profile"
 	printf 'github.com %s\n' "$KEYTEXT" >"$h/.ssh/known_hosts"
 	printf '[user]\n\temail = %s\n' "$GIT_NOREPLY" >"$h/.gitconfig"
+	mkdir -p "$h/.config/anaiis-dotfiles"
+	printf '%s\n' "$TERM_SECRET" >"$h/.config/anaiis-dotfiles/employer-terms.txt"
 	printf '%s\n' "$h"
 }
 
 # doctor <home>: run the script. OUT holds stdout and stderr, RC the exit code.
-# PROTO (default ssh) sets the stub gh answer; BIN_DIR (default $TMPD/bin) sets PATH.
+# PROTO (default ssh) sets the stub gh answer for github.com. PROTO_GLOBAL (default https) sets the
+# global answer. BIN_DIR (default $TMPD/bin) sets PATH.
 # CLAUDE_V (default: a new version) sets the line that the stub claude prints for --version.
 # SQLFMT_V (default: version 0.32.0) sets the line that the stub sqlfmt prints. Empty makes it fail.
 # GH_USER (default empty) sets the address that the stub gh prints for `api user`. Empty means not signed in.
+# TERMS_ENV and TERMS_XDG (default empty) set EMPLOYER_TERMS_FILE and XDG_CONFIG_HOME, so the real
+# environment of the machine never reaches the doctor.
 doctor() {
-	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" \
+	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" STUB_GLOBAL_PROTOCOL="${PROTO_GLOBAL-https}" \
+		EMPLOYER_TERMS_FILE="${TERMS_ENV-}" XDG_CONFIG_HOME="${TERMS_XDG-}" \
 		STUB_GH_USER="${GH_USER-}" STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
+
 	RC=$?
 }
 
@@ -239,8 +256,9 @@ assert_eq "0.1 exit code 0" 0 "$RC"
 assert_eq "0.2 no MISSING line" 0 "$(miss_count)"
 assert_eq "0.3 summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
 # 2 bashrc + 1 login + 8 links + 1 memory folder + 2 enabled plugins + 1 host key + 1 claude version
-# + 1 harness bash pin + 1 hook command prefix + 1 sqlfmt + 1 git email. The disabled plugin is not listed.
-assert_eq "0.4 twenty ok lines" 20 "$(ok_count)"
+# + 1 harness bash pin + 1 hook command prefix + 1 sqlfmt + 1 employer terms file + 1 git email. The
+# disabled plugin is not listed.
+assert_eq "0.4 twenty-one ok lines" 21 "$(ok_count)"
 assert_eq "0.5 the disabled plugin is not checked" 0 "$(printf '%s\n' "$OUT" | grep -c 'off@mk3' || true)"
 assert_eq "0.6 the HOME is unchanged" "$SNAP0" "$(snapshot "$H0")"
 assert_eq "0.7 a real memory folder is ok" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok ~/.claude/memory (local folder)$' || true)"
@@ -395,24 +413,71 @@ BIN_DIR="$TMPD/bin-nojq" expect_one "4.5 jq is not installed" "$H" "MISSING jq (
 echo "--- 5. GitHub host key"
 H="$(build_home)"
 rm "$H/.ssh/known_hosts"
-expect_one "5.1 ssh protocol and no host key" "$H" "MISSING github.com host key (~/.ssh/known_hosts): $FIX_KEYS"
+expect_one "5.1 ssh protocol and no host key" "$H" "MISSING github.com host key (~/.ssh/known_hosts; gh protocol ssh): $FIX_KEYS"
 H="$(build_home)"
 printf 'example.org %s\n' "$KEYTEXT" >"$H/.ssh/known_hosts"
 expect_one "5.2 ssh protocol and a known_hosts file without github.com" "$H" \
-	"MISSING github.com host key (~/.ssh/known_hosts): $FIX_KEYS"
+	"MISSING github.com host key (~/.ssh/known_hosts; gh protocol ssh): $FIX_KEYS"
 H="$(build_home)"
 rm "$H/.ssh/known_hosts"
 PROTO=https doctor "$H"
-assert_eq "5.3 https protocol: exit 0 without a host key" 0 "$RC"
-assert_eq "5.4 https protocol: the ok line says it is not needed" 1 \
-	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol is https)')"
+assert_eq "5.3 https protocol and https origin: exit 0 without a host key" 0 "$RC"
+assert_eq "5.4 https protocol and https origin: the ok line says it is not needed" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin https)')"
 PROTO="" doctor "$H"
 assert_eq "5.5 unset protocol: exit 0" 0 "$RC"
 assert_eq "5.6 unset protocol: the ok line says so" 1 \
-	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol is unset)')"
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol unset, origin https)')"
 BIN_DIR="$TMPD/bin-nogh" doctor "$H"
 assert_eq "5.7 no gh: exit 0 without a host key" 0 "$RC"
 assert_eq "5.8 no gh: the ok line says so" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh not found)')"
+# Issue 16: an SSH origin needs the host key even when the gh value for github.com is https or unset.
+ORIGIN_SSH='git@github.com:anaiis-io/anaiis-dotfiles.git'
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote set-url origin "$ORIGIN_SSH"
+PROTO=https expect_one "5.9 https gh value, ssh origin, no host key" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; origin remote ssh): $FIX_KEYS"
+PROTO="" expect_one "5.10 unset gh value, ssh origin, no host key" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; origin remote ssh): $FIX_KEYS"
+expect_one "5.11 ssh gh value and ssh origin: the line names both" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; gh protocol ssh, origin remote ssh): $FIX_KEYS"
+H="$(build_home)"
+git -C "$H/anaiis-dotfiles" remote set-url origin "$ORIGIN_SSH"
+PROTO=https doctor "$H"
+assert_eq "5.12 ssh origin and a host key: exit 0" 0 "$RC"
+assert_eq "5.13 ssh origin and a host key: the ok line names the source" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (origin remote ssh)$')"
+H="$(build_home)"
+doctor "$H"
+assert_eq "5.14 ssh gh value and a host key: the ok line names the source" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (gh protocol ssh)$')"
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote set-url origin 'ssh://git@github.com/anaiis-io/anaiis-dotfiles.git'
+PROTO=https expect_one "5.15 an ssh:// origin counts as ssh" "$H" \
+	"MISSING github.com host key (~/.ssh/known_hosts; origin remote ssh): $FIX_KEYS"
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote remove origin
+PROTO=https doctor "$H"
+assert_eq "5.16 no origin remote and https gh value: exit 0" 0 "$RC"
+assert_eq "5.17 no origin remote: the ok line says so" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin none)')"
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+git -C "$H/anaiis-dotfiles" remote set-url origin /srv/git/anaiis-dotfiles.git
+PROTO=https doctor "$H"
+assert_eq "5.18 an origin that is not a GitHub URL does not need the github.com key: exit 0" 0 "$RC"
+assert_eq "5.19 a non-GitHub origin: the ok line says other" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin other)')"
+# The gh value for github.com wins over the global value, as gh itself resolves it.
+H="$(build_home)"
+rm "$H/.ssh/known_hosts"
+PROTO=https PROTO_GLOBAL=ssh doctor "$H"
+assert_eq "5.20 global ssh but github.com https: exit 0" 0 "$RC"
+assert_eq "5.21 global ssh but github.com https: not needed" 1 \
+	"$(printf '%s\n' "$OUT" | grep -c '^ok github.com host key (not needed: gh protocol https, origin https)')"
 
 echo "--- 6. Claude Code version"
 # onFailure support starts at 2.1.295. Each case below fails a different wrong comparison: a lexical
@@ -539,58 +604,93 @@ assert_eq "10.8 --version fails: the one WARN line" "WARN sqlfmt ($TMPD/bin/sqlf
 SQLFMT_V="usage: sqlfmt [OPTIONS]" doctor "$H0"
 assert_eq "10.9 other text: the one WARN line" "WARN sqlfmt ($TMPD/bin/sqlfmt does not run): $FIX_SQLFMT" "$(warn_lines)"
 
-echo "--- 11. the global git email"
-# README step 6 sets user.email in the git config of the machine, and nothing else checks it. A machine that
-# skips it commits as $USER@host or as a stale work address, also in public repos. A gap is a WARN, not
-# missing: a work machine may keep a work address on purpose. The fix names the derived address when the
+echo "--- 11. the employer terms file"
+# tests/test-public-tree.sh scans the tracked tree for the terms in this file, and it skips the scan when
+# the file is absent or empty. A reader could think the guard ran when it did not (issue 15). The doctor
+# reads the same path as that suite: EMPLOYER_TERMS_FILE, else $XDG_CONFIG_HOME or ~/.config, then
+# anaiis-dotfiles/employer-terms.txt. A gap is a WARN. The doctor never prints a term.
+FIX_TERMS='list one employer term per line in ~/.config/anaiis-dotfiles/employer-terms.txt, or set EMPLOYER_TERMS_FILE. Without terms, tests/test-public-tree.sh skips its employer check.'
+H="$(build_home)"
+doctor "$H"
+assert_eq "11.1 a file with a term: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
+assert_eq "11.2 a file with a term: no WARN line" "" "$(warn_lines)"
+assert_eq "11.3 the output never holds a term" 0 "$(printf '%s\n' "$OUT" | grep -c -F -- "$TERM_SECRET" || true)"
+H="$(build_home)"
+rm "$H/.config/anaiis-dotfiles/employer-terms.txt"
+SNAPT="$(snapshot "$H")"
+doctor "$H"
+assert_eq "11.4 absent: exit code 0" 0 "$RC"
+assert_eq "11.5 absent: the one WARN line" "WARN employer terms file (absent): $FIX_TERMS" "$(warn_lines)"
+assert_eq "11.6 absent: summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
+assert_eq "11.7 absent: the HOME is unchanged" "$SNAPT" "$(snapshot "$H")"
+printf '\n  \n\t\n' >"$H/.config/anaiis-dotfiles/employer-terms.txt"
+doctor "$H"
+assert_eq "11.8 only blank lines: the one WARN line" "WARN employer terms file (empty): $FIX_TERMS" "$(warn_lines)"
+assert_eq "11.9 only blank lines: exit code 0" 0 "$RC"
+H="$(build_home)"
+rm "$H/.config/anaiis-dotfiles/employer-terms.txt"
+printf '%s\n' "$TERM_SECRET" >"$H/custom-terms.txt"
+TERMS_ENV="$H/custom-terms.txt" doctor "$H"
+assert_eq "11.10 EMPLOYER_TERMS_FILE names the file: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
+mkdir -p "$H/xdg/anaiis-dotfiles"
+printf '%s\n' "$TERM_SECRET" >"$H/xdg/anaiis-dotfiles/employer-terms.txt"
+TERMS_XDG="$H/xdg" doctor "$H"
+assert_eq "11.11 XDG_CONFIG_HOME moves the default folder: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
+TERMS_ENV="$H/missing.txt" doctor "$H"
+assert_eq "11.12 EMPLOYER_TERMS_FILE names an absent file: the WARN line" "WARN employer terms file (absent): $FIX_TERMS" "$(warn_lines)"
+
+echo "--- 12. the global git email"
+# The README (section "Install") sets user.email in the git config of the machine, and nothing else
+# checks it. A machine that skips it commits as $USER@host or as a stale work address, also in public
+# repos. A gap is a WARN, not missing: a work machine may keep a work address on purpose. The fix names the derived address when the
 # helper finds one (a signed-in gh), else the placeholder.
 FIX_EMAIL_PLACEHOLDER='git config --global user.email <id>+<login>@users.noreply.github.com'
 FIX_EMAIL_DERIVED="git config --global user.email $GIT_NOREPLY"
 doctor "$H0"
-assert_eq "11.1 a noreply address: the ok line names it" 1 "$(printf '%s\n' "$OUT" | grep -cFx "ok git email $GIT_NOREPLY" || true)"
-assert_eq "11.2 a noreply address: no WARN line" "" "$(warn_lines)"
+assert_eq "12.1 a noreply address: the ok line names it" 1 "$(printf '%s\n' "$OUT" | grep -cFx "ok git email $GIT_NOREPLY" || true)"
+assert_eq "12.2 a noreply address: no WARN line" "" "$(warn_lines)"
 H="$(build_home)"
 printf '[user]\n\temail = octo@users.noreply.github.com\n' >"$H/.gitconfig"
 doctor "$H"
-assert_eq "11.3 the <login> noreply shape is ok too" 1 "$(printf '%s\n' "$OUT" | grep -cFx 'ok git email octo@users.noreply.github.com' || true)"
+assert_eq "12.3 the <login> noreply shape is ok too" 1 "$(printf '%s\n' "$OUT" | grep -cFx 'ok git email octo@users.noreply.github.com' || true)"
 
 H="$(build_home)"
 rm "$H/.gitconfig"
-SNAP11="$(snapshot "$H")"
+SNAP12="$(snapshot "$H")"
 doctor "$H"
-assert_eq "11.4 unset: exit code 0" 0 "$RC"
-assert_eq "11.5 unset: the one WARN line names the placeholder fix" \
+assert_eq "12.4 unset: exit code 0" 0 "$RC"
+assert_eq "12.5 unset: the one WARN line names the placeholder fix" \
 	"WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
-assert_eq "11.6 unset: summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
-assert_eq "11.7 unset: no ok line for the git email" 0 "$(printf '%s\n' "$OUT" | grep -c '^ok git email' || true)"
-assert_eq "11.8 the check changes nothing in the HOME" "$SNAP11" "$(snapshot "$H")"
+assert_eq "12.6 unset: summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
+assert_eq "12.7 unset: no ok line for the git email" 0 "$(printf '%s\n' "$OUT" | grep -c '^ok git email' || true)"
+assert_eq "12.8 the check changes nothing in the HOME" "$SNAP12" "$(snapshot "$H")"
 GH_USER="$GIT_NOREPLY" doctor "$H"
-assert_eq "11.9 unset with a signed-in gh: the fix names the derived address" \
+assert_eq "12.9 unset with a signed-in gh: the fix names the derived address" \
 	"WARN git email (global user.email is unset): $FIX_EMAIL_DERIVED" "$(warn_lines)"
 BIN_DIR="$TMPD/bin-nogh" GH_USER="$GIT_NOREPLY" doctor "$H"
-assert_eq "11.10 unset without gh: the fix keeps the placeholder" \
+assert_eq "12.10 unset without gh: the fix keeps the placeholder" \
 	"WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
 
 H="$(build_home)"
 printf '[user]\n\temail = pat@example.com\n' >"$H/.gitconfig"
 doctor "$H"
-assert_eq "11.11 a work address: exit code 0" 0 "$RC"
-assert_eq "11.12 a work address: the one WARN line names the address and the fix" \
+assert_eq "12.11 a work address: exit code 0" 0 "$RC"
+assert_eq "12.12 a work address: the one WARN line names the address and the fix" \
 	"WARN git email (pat@example.com is not a GitHub noreply address): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
-assert_eq "11.13 a work address: no MISSING line, summary line" "0 doctor: 0 missing" \
+assert_eq "12.13 a work address: no MISSING line, summary line" "0 doctor: 0 missing" \
 	"$(miss_count) $(printf '%s\n' "$OUT" | tail -n 1)"
-assert_eq "11.14 a work address: no ok line for the git email" 0 "$(printf '%s\n' "$OUT" | grep -c '^ok git email' || true)"
+assert_eq "12.14 a work address: no ok line for the git email" 0 "$(printf '%s\n' "$OUT" | grep -c '^ok git email' || true)"
 GH_USER="$GIT_NOREPLY" doctor "$H"
-assert_eq "11.15 a work address with a signed-in gh: the fix names the derived address" \
+assert_eq "12.15 a work address with a signed-in gh: the fix names the derived address" \
 	"WARN git email (pat@example.com is not a GitHub noreply address): $FIX_EMAIL_DERIVED" "$(warn_lines)"
 H="$(build_home)"
 printf '[user]\n\temail = octo@users.noreply.github.com.evil.io\n' >"$H/.gitconfig"
 doctor "$H"
-assert_eq "11.16 a look-alike domain is a WARN" 1 "$(warn_lines | grep -c '^WARN git email (octo@users.noreply.github.com.evil.io is not' || true)"
+assert_eq "12.16 a look-alike domain is a WARN" 1 "$(warn_lines | grep -c '^WARN git email (octo@users.noreply.github.com.evil.io is not' || true)"
 H="$(build_home)"
 printf '[user]\n\temail =\n' >"$H/.gitconfig"
 doctor "$H"
-assert_eq "11.17 an empty value counts as unset" "WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
+assert_eq "12.17 an empty value counts as unset" "WARN git email (global user.email is unset): $FIX_EMAIL_PLACEHOLDER" "$(warn_lines)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

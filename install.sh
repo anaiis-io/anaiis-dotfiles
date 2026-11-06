@@ -189,6 +189,27 @@ source "$HOME/anaiis-dotfiles/bash/shared.bash"
 	fi
 }
 
+# ssh_signals <repo-dir>: decide whether this machine uses SSH for github.com. Two signals count: the
+# protocol that gh uses for github.com, and the origin remote of the repo. gh keeps a global value and
+# one for each host; the host value wins, so only it counts (issue 16). Sets three variables:
+# SSH_GH (the gh value, or "unset"), SSH_ORIGIN (ssh, https, other, or none), SSH_REASON (empty when
+# no signal says ssh). bootstrap-doctor.sh holds the same rule. Both run on bash 3.2.
+ssh_signals() {
+	local origin
+	SSH_GH="$(gh config get git_protocol --host github.com 2>/dev/null)" || SSH_GH=""
+	origin="$(git -C "$1" remote get-url origin 2>/dev/null)" || origin=""
+	case "$origin" in
+		git@github.com:* | ssh://git@github.com/* | ssh://github.com/*) SSH_ORIGIN=ssh ;;
+		https://* | http://*) SSH_ORIGIN=https ;;
+		"") SSH_ORIGIN=none ;;
+		*) SSH_ORIGIN=other ;;
+	esac
+	SSH_REASON=""
+	[ "$SSH_GH" = ssh ] && SSH_REASON="gh protocol ssh"
+	if [ "$SSH_ORIGIN" = ssh ]; then SSH_REASON="${SSH_REASON:+$SSH_REASON, }origin remote ssh"; fi
+	SSH_GH="${SSH_GH:-unset}"
+}
+
 # Step 4: add the GitHub host keys to $HOME/.ssh/known_hosts (decision D-012).
 # Plugin clones over SSH fail without them. The function never aborts the installer:
 # every refusal prints one reason and returns 0. It writes only when the fingerprints
@@ -197,14 +218,14 @@ source "$HOME/anaiis-dotfiles/bash/shared.bash"
 wire_github_hostkeys() {
 	echo ""
 	echo "=== GitHub host keys (~/.ssh/known_hosts) ==="
-	local known="$HOME/.ssh/known_hosts" proto keys prints want got tmp count
+	local known="$HOME/.ssh/known_hosts" keys prints want got tmp count
 	if ! command -v gh >/dev/null 2>&1; then
 		echo "  skip  gh not found. Install it and run gh auth login, then: bash install.sh --hostkeys-only"
 		return 0
 	fi
-	proto="$(gh config get git_protocol 2>/dev/null)" || proto=""
-	if [ "$proto" != "ssh" ]; then
-		echo "  skip  gh git protocol is \"${proto:-unset}\", not ssh. No host key is needed."
+	ssh_signals "$DOTFILES"
+	if [ -z "$SSH_REASON" ]; then
+		echo "  skip  no host key needed: gh protocol for github.com is \"$SSH_GH\", origin remote is $SSH_ORIGIN."
 		return 0
 	fi
 	if ssh-keygen -F github.com -f "$known" >/dev/null 2>&1; then
