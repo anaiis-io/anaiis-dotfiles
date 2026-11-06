@@ -38,7 +38,7 @@ git config --global user.name "<name>"
 git config --global user.email "<id>+<login>@users.noreply.github.com"
 ```
 
-`<id>` is the numeric id of your GitHub account. `<login>` is its login. This repo rejects a commit whose email is not a GitHub noreply address.
+`<id>` is the numeric id of your GitHub account. `<login>` is its login. This repo rejects a commit whose email, or a trailer address such as `Co-Authored-By`, is not a GitHub noreply address.
 
 The installer links `claude/` into `~/.claude/`, adds two lines to `~/.bashrc`, and adds the GitHub host keys when SSH is in use. It keeps `~/.claude/memory` as a local folder. It does not overwrite a real file where a link belongs.
 
@@ -50,7 +50,7 @@ bash ~/.claude/scripts/bootstrap-doctor.sh
 
 The doctor only reads. It prints `ok` or `MISSING <what>: <fix>` for each check. The last line is `doctor: <n> missing`. The doctor exits 1 when `n` is above 0. A `WARN` line does not count.
 
-The checks cover the shell wiring, the `~/.claude` links, the plugins, the GitHub host key, the Claude Code version, the bash pin, and `sqlfmt`. A plugin shows MISSING until Claude Code fetches it, so run the doctor after step 3.
+The checks cover the shell wiring, the `~/.claude` links, the plugins, the GitHub host key, the Claude Code version, and the bash pin. Three more checks only warn: `sqlfmt`, the employer terms file, and your git email. A plugin shows MISSING until Claude Code fetches it, so run the doctor after step 3.
 
 ## How it is organized
 
