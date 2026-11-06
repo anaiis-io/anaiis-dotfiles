@@ -11,7 +11,14 @@
 #   push    (repo-pre-push.sh) reads git's pre-push lines on stdin and checks the
 #           author and committer email of every commit that the push sends. This
 #           also covers commits that never ran pre-commit: --no-verify, merges,
-#           rebases, and cherry-picks.
+#           rebases, and cherry-picks. Usage: push <remote name> <url>. Git gives
+#           both to pre-push. A commit that the destination already holds is not
+#           checked. When the old tip of the pushed ref is unknown (a new branch,
+#           or a sha that the clone lacks), the check runs git ls-remote on the URL
+#           and skips the commits that the advertised refs reach and the clone
+#           holds. It never trusts the refs of another remote. If ls-remote fails or
+#           runs past NOREPLY_LS_REMOTE_TIMEOUT seconds (default 15), the check
+#           skips nothing and scans every pushed commit.
 #
 # Accepted: <id>+<login>@users.noreply.github.com, <login>@users.noreply.github.com
 # (a [bot] suffix allowed), and noreply@github.com (commits made on GitHub).
@@ -38,6 +45,37 @@ check() { # <what> <address>: report the address and set bad=1 when it is not no
 	bad=1
 }
 
+# destination_tips <url>: print each commit that the destination advertises and this clone holds.
+# Print nothing when ls-remote fails or runs too long. The caller then checks every pushed commit.
+destination_tips() {
+	local url="$1" out pid ticks sha type
+	if [ -z "$url" ]; then
+		printf 'noreply-email-check: could not list the refs of the destination (no URL); checking every pushed commit.\n' >&2
+		return 0
+	fi
+	out="$(mktemp)" || return 0
+	GIT_TERMINAL_PROMPT=0 git ls-remote -- "$url" >"$out" 2>/dev/null &
+	pid=$!
+	ticks=$((${NOREPLY_LS_REMOTE_TIMEOUT:-15} * 10))
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ "$ticks" -le 0 ]; then
+			kill "$pid" 2>/dev/null || true
+			break
+		fi
+		sleep 0.1
+		ticks=$((ticks - 1))
+	done
+	if wait "$pid" 2>/dev/null; then
+		cut -f1 "$out" | git cat-file --batch-check='%(objectname) %(objecttype)' | while read -r sha type; do
+			if [ "$type" = commit ]; then printf '%s\n' "$sha"; fi
+		done
+	else
+		printf 'noreply-email-check: could not list the refs of "%s"; checking every pushed commit.\n' "$url" >&2
+	fi
+	rm -f "$out"
+	return 0
+}
+
 case "$MODE" in
 	staged)
 		for field in GIT_AUTHOR_IDENT GIT_COMMITTER_IDENT; do
@@ -49,14 +87,27 @@ case "$MODE" in
 		;;
 	push)
 		ZERO_SHA=0000000000000000000000000000000000000000
+		DEST_URL="${3:-}"
+		DEST_LOADED=0
+		DEST_TIPS=""
 		while read -r _local_ref local_sha _remote_ref remote_sha; do
 			case "$local_sha" in "" | "$ZERO_SHA") continue ;; esac
-			# Skip what the remote has: its old tip when this clone holds it, else every remote ref.
-			known=--remotes
+			# Skip what the destination has: its old tip when this clone holds it, else the commits behind its refs.
 			if [ "$remote_sha" != "$ZERO_SHA" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
 				known="$remote_sha"
+			else
+				if [ "$DEST_LOADED" -eq 0 ]; then
+					DEST_TIPS="$(destination_tips "$DEST_URL")"
+					DEST_LOADED=1
+				fi
+				known="$DEST_TIPS"
 			fi
-			commits="$(git log --format='%H %ae %ce' "$local_sha" --not "$known")"
+			commits="$(
+				{
+					printf '%s\n' "$local_sha"
+					for tip in $known; do printf '^%s\n' "$tip"; done
+				} | git log --format='%H %ae %ce' --stdin
+			)"
 			while read -r sha ae ce; do
 				[ -n "$sha" ] || continue
 				check "commit ${sha:0:12} (author)" "$ae"

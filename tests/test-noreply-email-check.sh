@@ -7,6 +7,11 @@
 # commit, before the test suite runs. A repo without the marker is not checked.
 # SKIP_EMAIL_CHECK=1 bypasses both.
 #
+# Push mode skips only history that the push destination already holds. When the
+# old tip of the pushed ref is unknown, the check asks the destination for its refs
+# (git ls-remote on the URL that git gives to pre-push) and trusts no other remote.
+# Every remote in these cases is a local bare repo, so no case uses the network.
+#
 # Why: on 2026-11-05 a commit with a private address reached `git push`, and
 # GitHub's GH007 caught it only at the server. GH007 does not know a work email,
 # so a work email would have been published.
@@ -24,6 +29,7 @@ set -u
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$REPO_DIR/claude/scripts/install-repo-hooks.sh"
 PRE_PUSH="$REPO_DIR/claude/hooks/repo-pre-push.sh"
+ENSURE="$REPO_DIR/claude/hooks/ensure-repo-hooks.sh"
 
 PASS=0
 FAIL=0
@@ -89,13 +95,37 @@ try_commit() {
 	if [ "$before" = "$after" ]; then echo rejected; else echo accepted; fi
 }
 
-# run_push <dir> <stdin lines>: call the pre-push dispatcher the way git does;
-# print its exit status. Output goes to $WORK/last.out.
+# run_push <dir> <stdin lines> [<remote name> <url>]: call the pre-push dispatcher the way
+# git does; print its exit status. Output goes to $WORK/last.out. The default URL does not
+# exist, so a case that needs the destination must pass one.
 run_push() {
 	local dir="$1" lines="$2"
 	rm -f "$dir/.suite-ran"
-	(cd "$dir" && printf '%s\n' "$lines" | HOME="$TMP_HOME" bash "$PRE_PUSH" origin url) >"$WORK/last.out" 2>&1
+	(cd "$dir" && printf '%s\n' "$lines" | HOME="$TMP_HOME" bash "$PRE_PUSH" "${3:-origin}" "${4:-$WORK/no-such-url.git}") >"$WORK/last.out" 2>&1
 	echo "$?"
+}
+
+# try_push <dir> <git push args...>: run a real git push through the installed pre-push shim.
+# Print "accepted", "rejected" (the check refused), or "error: <git output>".
+try_push() {
+	local dir="$1" rc
+	shift
+	(cd "$dir" && env HOME="$TMP_HOME" git push -q "$@") >"$WORK/last.out" 2>&1
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		echo accepted
+	elif grep -q 'noreply-email-check:' "$WORK/last.out"; then
+		echo rejected
+	else
+		echo "error: $(head -3 "$WORK/last.out" | tr '\n' ' ')"
+	fi
+}
+
+new_bare() { git init -q --bare "$1"; }
+
+# seed_dest <repo> <destination> <sha> <ref>: put a commit into a destination, with the check off.
+seed_dest() {
+	(cd "$1" && env HOME="$TMP_HOME" SKIP_EMAIL_CHECK=1 git push -q "$2" "$3:$4") >/dev/null 2>&1
 }
 
 R="$WORK/marked"
@@ -169,21 +199,171 @@ assert_eq "8.1 a range that holds one private-email commit is rejected" 1 \
 assert_eq "8.2 the reject message names the address" 1 "$(grep -cF -- "$BAD" "$WORK/last.out")"
 assert_eq "8.3 a deletion line alone is skipped" 0 \
 	"$(run_push "$R" "(delete) $ZERO refs/heads/old $BADSHA")"
-git -C "$R" update-ref refs/remotes/origin/main "$BADSHA"
-assert_eq "8.4 a new branch checks only commits that no remote ref holds" 0 \
-	"$(run_push "$R" "refs/heads/topic $TOP refs/heads/topic $ZERO")"
+# The destination D1 holds the private-email commit, as a legacy commit that was pushed long ago.
+# This clone has no remote-tracking ref at all (a fresh init plus remote add, before any fetch).
+D1="$WORK/d1.git"
+D2="$WORK/d2.git"
+new_bare "$D1"
+new_bare "$D2"
+seed_dest "$R" "$D1" "$BADSHA" refs/heads/legacy
+assert_eq "8.4 a new branch skips a commit that the destination holds, with no tracking ref" 0 \
+	"$(run_push "$R" "refs/heads/topic $TOP refs/heads/topic $ZERO" origin "$D1")"
 assert_eq "8.5 the suite still runs after a clean check" 1 "$([ -e "$R/.suite-ran" ] && echo 1 || echo 0)"
-git -C "$R" update-ref -d refs/remotes/origin/main
-assert_eq "8.6 a new branch with an unpushed private-email commit is rejected" 1 \
-	"$(run_push "$R" "refs/heads/topic $TOP refs/heads/topic $ZERO")"
-git -C "$R" update-ref refs/remotes/origin/main "$BASE"
-assert_eq "8.7 a remote sha that the clone lacks falls back to the remote refs" 1 \
-	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main 1111111111111111111111111111111111111111")"
+assert_eq "8.6 a new branch with a private-email commit that the destination lacks is rejected" 1 \
+	"$(run_push "$R" "refs/heads/topic $TOP refs/heads/topic $ZERO" origin "$D2")"
+assert_eq "8.7 a remote sha that the clone lacks: the destination refs decide, so a lacking destination rejects" 1 \
+	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main 1111111111111111111111111111111111111111" origin "$D2")"
 assert_eq "8.8 a push reject gives the --amend hint for the listed commits" 1 "$(grep -c -- '--amend' "$WORK/last.out")"
-git -C "$R" update-ref refs/remotes/origin/main "$BADSHA"
-assert_eq "8.7b the fallback leaves out a private-email commit that a remote ref holds" 0 \
-	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main 1111111111111111111111111111111111111111")"
-git -C "$R" update-ref -d refs/remotes/origin/main
+assert_eq "8.7b a remote sha that the clone lacks: a destination that holds the private-email commit leaves it out" 0 \
+	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main 1111111111111111111111111111111111111111" origin "$D1")"
+assert_eq "8.9 a known old tip needs no destination call: the URL is not read" 0 \
+	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main $BADSHA" origin "$WORK/no-such-url.git")"
+
+echo "=== 9. push mode: only the destination counts ==="
+# new_pushrepo <dir>: a marked repo with a good commit, a private-email commit PBAD (made with the
+# check off), and a good commit on top. PBAD is the history that must not reach a destination that lacks it.
+new_pushrepo() {
+	make_repo "$1" 1
+	try_commit "$1" SKIP_EMAIL_CHECK=1 GIT_AUTHOR_EMAIL="$BAD" git commit -q --allow-empty -m pbad >/dev/null
+	PBAD="$(git -C "$1" rev-parse HEAD)"
+	try_commit "$1" git commit -q --allow-empty -m ptop >/dev/null
+}
+fetch_remote() { (cd "$1" && env HOME="$TMP_HOME" git fetch -q "$2") >/dev/null 2>&1; }
+
+# 9.1: a private work remote holds PBAD. The push goes to the public origin, which lacks it.
+P1="$WORK/p1"
+new_pushrepo "$P1"
+new_bare "$WORK/work1.git"
+new_bare "$WORK/origin1.git"
+git -C "$P1" remote add work "$WORK/work1.git"
+git -C "$P1" remote add origin "$WORK/origin1.git"
+seed_dest "$P1" "$WORK/work1.git" "$PBAD" refs/heads/feature
+fetch_remote "$P1" work
+assert_eq "9.0 the clone has a tracking ref of the work remote that holds the private-email commit" "$PBAD" \
+	"$(git -C "$P1" rev-parse --verify -q refs/remotes/work/feature)"
+assert_eq "9.1 a commit that only another remote holds is still checked" rejected \
+	"$(try_push "$P1" origin main:refs/heads/feature)"
+assert_eq "9.2 the reject message names the address" 1 "$(grep -cF -- "$BAD" "$WORK/last.out")"
+seed_dest "$P1" "$WORK/origin1.git" "$PBAD" refs/heads/legacy
+assert_eq "9.3 the same push passes once the destination itself holds that commit" accepted \
+	"$(try_push "$P1" origin main:refs/heads/feature)"
+
+# 9.4: a stale tracking ref. The clone thinks origin holds PBAD. The server does not (it was deleted).
+P2="$WORK/p2"
+new_pushrepo "$P2"
+new_bare "$WORK/origin2.git"
+git -C "$P2" remote add origin "$WORK/origin2.git"
+git -C "$P2" update-ref refs/remotes/origin/feature "$PBAD"
+assert_eq "9.4 a stale tracking ref does not hide a commit that the destination lacks" rejected \
+	"$(try_push "$P2" origin main:refs/heads/other)"
+
+# 9.5: a push to a bare URL. No remote name exists, so git passes the URL as both arguments.
+P3="$WORK/p3"
+new_pushrepo "$P3"
+new_bare "$WORK/url-has.git"
+new_bare "$WORK/url-lacks.git"
+seed_dest "$P3" "$WORK/url-has.git" "$PBAD" refs/heads/legacy
+assert_eq "9.5 a push to a bare URL that lacks the commit is rejected" rejected \
+	"$(try_push "$P3" "$WORK/url-lacks.git" main:refs/heads/feature)"
+assert_eq "9.6 a push to a bare URL that holds the commit is accepted" accepted \
+	"$(try_push "$P3" "$WORK/url-has.git" main:refs/heads/feature)"
+
+# 9.7: a remote whose pushurl differs from its fetch url. git gives the pushurl to pre-push.
+P4="$WORK/p4"
+new_pushrepo "$P4"
+new_bare "$WORK/fetch4.git"
+new_bare "$WORK/push4.git"
+git -C "$P4" remote add split "$WORK/fetch4.git"
+git -C "$P4" remote set-url --push split "$WORK/push4.git"
+seed_dest "$P4" "$WORK/fetch4.git" "$PBAD" refs/heads/feature
+fetch_remote "$P4" split
+assert_eq "9.7 a commit that only the fetch url holds is rejected on a push to the pushurl" rejected \
+	"$(try_push "$P4" split main:refs/heads/feature)"
+seed_dest "$P4" "$WORK/push4.git" "$PBAD" refs/heads/legacy
+assert_eq "9.8 the push passes once the pushurl holds the commit" accepted \
+	"$(try_push "$P4" split main:refs/heads/feature)"
+
+# 9.9: ls-remote fails. The check cannot know what the destination holds, so it scans every pushed commit.
+P5="$WORK/p5"
+new_pushrepo "$P5"
+PTOP5="$(git -C "$P5" rev-parse HEAD)"
+assert_eq "9.9 a destination that cannot be listed: the whole history is checked" 1 \
+	"$(run_push "$P5" "refs/heads/topic $PTOP5 refs/heads/topic $ZERO" origin "$WORK/no-such-url.git")"
+assert_eq "9.10 the check says that it scanned everything" 1 "$(grep -c 'could not list' "$WORK/last.out")"
+assert_eq "9.11 no URL (an old shim): the whole history is checked" 1 \
+	"$(
+		cd "$P5" && printf 'refs/heads/topic %s refs/heads/topic %s\n' "$PTOP5" "$ZERO" | HOME="$TMP_HOME" bash "$PRE_PUSH" >/dev/null 2>&1
+		echo $?
+	)"
+
+# 9.12: ls-remote hangs. A wrapper git sleeps on ls-remote only. The time limit makes the check give up.
+SLOW="$WORK/slowgit"
+mkdir -p "$SLOW"
+REAL_GIT="$(command -v git)"
+# shellcheck disable=SC2016 # "$1" and "$@" stay literal: they are the text of the wrapper script
+printf '#!/bin/sh\n[ "$1" = ls-remote ] && exec sleep 30\nexec "%s" "$@"\n' "$REAL_GIT" >"$SLOW/git"
+chmod +x "$SLOW/git"
+new_bare "$WORK/hang.git"
+seed_dest "$P5" "$WORK/hang.git" "$PBAD" refs/heads/legacy
+T0=$SECONDS
+HANG_RC="$(
+	cd "$P5" && printf 'refs/heads/topic %s refs/heads/topic %s\n' "$PTOP5" "$ZERO" \
+		| env HOME="$TMP_HOME" PATH="$SLOW:$PATH" NOREPLY_LS_REMOTE_TIMEOUT=1 bash "$PRE_PUSH" origin "$WORK/hang.git" >"$WORK/last.out" 2>&1
+	echo $?
+)"
+assert_eq "9.12 a destination that hangs: the check gives up and scans the whole history" 1 "$HANG_RC"
+assert_eq "9.13 the check gave up at the time limit, not at the hang" 1 "$([ $((SECONDS - T0)) -lt 15 ] && echo 1 || echo 0)"
+
+echo "=== 10. the pre-push shim passes the remote name and URL ==="
+# git gives the remote name and URL to pre-push as $1 and $2. A shim that drops them leaves the check blind.
+# Shims that are already installed hold the old line. The installer and the auto-installer must rewrite
+# that one line in place and leave the rest of the hook alone.
+# shellcheck disable=SC2016 # "$HOME" and "$@" stay literal: they are the text of the shim
+OLD_LINE='bash "$HOME/.claude/hooks/repo-pre-push.sh"'
+# shellcheck disable=SC2016 # same reason as OLD_LINE
+NEW_LINE='bash "$HOME/.claude/hooks/repo-pre-push.sh" "$@"'
+S1="$WORK/shim1"
+make_repo "$S1" 0
+assert_eq "10.1 a new shim passes all arguments to the dispatcher" 1 "$(grep -cFx -- "$NEW_LINE" "$S1/.git/hooks/pre-push")"
+assert_eq "10.2 a new shim holds no line without the arguments" 0 "$(grep -cFx -- "$OLD_LINE" "$S1/.git/hooks/pre-push")"
+
+# old_shim <dir>: a repo whose pre-push hook has the old dispatcher line between two custom lines.
+old_shim() {
+	make_repo "$1" 0
+	printf '#!/usr/bin/env bash\necho custom-before\n%s\necho custom-after\n' "$OLD_LINE" >"$1/.git/hooks/pre-push"
+	chmod +x "$1/.git/hooks/pre-push"
+}
+S2="$WORK/shim2"
+old_shim "$S2"
+S2_OUT="$(cd "$S2" && HOME="$TMP_HOME" bash "$INSTALLER" 2>&1)"
+assert_eq "10.3 the installer rewrites the old line in place and keeps the custom lines" \
+	"#!/usr/bin/env bash|echo custom-before|$NEW_LINE|echo custom-after" \
+	"$(tr '\n' '|' <"$S2/.git/hooks/pre-push" | sed 's/|$//')"
+assert_eq "10.4 the installer reports the migration" 1 "$(printf '%s\n' "$S2_OUT" | grep -c '^  migrated .*pre-push')"
+assert_eq "10.5 the migrated hook is executable" 1 "$([ -x "$S2/.git/hooks/pre-push" ] && echo 1 || echo 0)"
+S2_SUM="$(cksum <"$S2/.git/hooks/pre-push")"
+S2_OUT2="$(cd "$S2" && HOME="$TMP_HOME" bash "$INSTALLER" 2>&1)"
+assert_eq "10.6 a second run leaves the hook byte-identical and reports ok" "$S2_SUM 3" \
+	"$(cksum <"$S2/.git/hooks/pre-push") $(printf '%s\n' "$S2_OUT2" | grep -c '^  ok ')"
+
+S3="$WORK/shim3"
+old_shim "$S3"
+S3_ERR="$(cd "$S3" && HOME="$TMP_HOME" bash "$ENSURE" 2>&1)"
+assert_eq "10.7 the auto-installer migrates an old shim although all three hooks carry their markers" 1 \
+	"$(grep -cFx -- "$NEW_LINE" "$S3/.git/hooks/pre-push")"
+assert_eq "10.8 the auto-installer is silent and keeps the custom lines" "|1 1" \
+	"$S3_ERR|$(grep -cFx 'echo custom-before' "$S3/.git/hooks/pre-push") $(grep -cFx 'echo custom-after' "$S3/.git/hooks/pre-push")"
+S3_SUM="$(cksum <"$S3/.git/hooks/pre-push")"
+(cd "$S3" && HOME="$WORK/no-such-home" bash "$ENSURE" >/dev/null 2>&1)
+assert_eq "10.9 a migrated shim ends the auto-installer early" "$S3_SUM" "$(cksum <"$S3/.git/hooks/pre-push")"
+
+# A line that only starts like the dispatcher is not that line. The migration must not touch it.
+S4="$WORK/shim4"
+make_repo "$S4" 0
+printf '#!/usr/bin/env bash\n%s || exit 1\n' "$OLD_LINE" >"$S4/.git/hooks/pre-push"
+S4_SUM="$(cksum <"$S4/.git/hooks/pre-push")"
+(cd "$S4" && HOME="$TMP_HOME" bash "$INSTALLER" >/dev/null 2>&1)
+assert_eq "10.10 a customised dispatcher line is left alone" "$S4_SUM" "$(cksum <"$S4/.git/hooks/pre-push")"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -6,13 +6,15 @@
 # Commits stay fast: repo-pre-commit.sh runs only the staged-file linters.
 #
 # Stable path (repos reference this; never rename it):
-#   bash "$HOME/.claude/hooks/repo-pre-push.sh"
+#   bash "$HOME/.claude/hooks/repo-pre-push.sh" "$@"
 #
-# Git passes the remote name and URL as arguments (ignored) and, on stdin, one
+# Git passes the remote name and URL as arguments and, on stdin, one
 # "<local ref> <local sha> <remote ref> <remote sha>" line per ref it will
-# update. The list is empty when everything is up to date, and a local sha of
-# all zeros marks a deletion. The suite runs only when at least one line sends
-# commits, so a no-op push returns git's own "Everything up-to-date" at once.
+# update. The arguments go to the noreply email check, which asks the destination
+# which commits it holds. The list is empty when everything is up to date, and a
+# local sha of all zeros marks a deletion. The suite runs only when at least one
+# line sends commits, so a no-op push returns git's own "Everything up-to-date"
+# at once.
 #
 # Bypass flag:
 #   SKIP_TESTS=1        git push  -- skip the test suite
@@ -37,7 +39,7 @@ fi
 
 # Identity before the suite: in a repo with .require-noreply-email, reject a push
 # that sends a commit whose author or committer email is not a GitHub noreply address.
-printf '%s\n' "$PUSH_LINES" | bash "$HOME/.claude/scripts/noreply-email-check.sh" push
+printf '%s\n' "$PUSH_LINES" | bash "$HOME/.claude/scripts/noreply-email-check.sh" push "${1:-}" "${2:-}"
 
 # Run the test suite if the repo has one. SKIP_TESTS=1 to bypass.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
