@@ -30,6 +30,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$REPO_DIR/claude/scripts/install-repo-hooks.sh"
 PRE_PUSH="$REPO_DIR/claude/hooks/repo-pre-push.sh"
 ENSURE="$REPO_DIR/claude/hooks/ensure-repo-hooks.sh"
+GH_HELPER="$REPO_DIR/claude/scripts/gh-noreply-address.sh"
 
 PASS=0
 FAIL=0
@@ -52,6 +53,26 @@ trap 'rm -rf "$WORK"' EXIT
 # shellcheck source=lib/fresh-home.sh
 . "$REPO_DIR/tests/lib/fresh-home.sh"
 TMP_HOME="$(TMPDIR="$WORK" fresh_home_new "$REPO_DIR")"
+
+# A stub gh answers the one call that gh-noreply-address.sh makes, so no case reads the real gh or the
+# network. STUB_GH_USER is the address to print. Empty or unset makes the stub fail, like a gh that is not
+# signed in. The stub accepts exactly: api user --jq <the expression>.
+mkdir -p "$WORK/ghstub"
+cat >"$WORK/ghstub/gh" <<'STUB'
+#!/bin/sh
+[ "$1 $2 $3" = "api user --jq" ] && [ "$4" = '"\(.id)+\(.login)@users.noreply.github.com"' ] || {
+	echo "stub gh: unexpected arguments: $*" >&2
+	exit 64
+}
+[ -n "${STUB_GH_USER:-}" ] || {
+	echo "gh: not logged in" >&2
+	exit 4
+}
+printf '%s\n' "$STUB_GH_USER"
+STUB
+chmod +x "$WORK/ghstub/gh"
+export PATH="$WORK/ghstub:$PATH"
+unset STUB_GH_USER
 
 unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL \
 	GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE SKIP_EMAIL_CHECK 2>/dev/null || true
@@ -213,7 +234,7 @@ assert_eq "8.6 a new branch with a private-email commit that the destination lac
 	"$(run_push "$R" "refs/heads/topic $TOP refs/heads/topic $ZERO" origin "$D2")"
 assert_eq "8.7 a remote sha that the clone lacks: the destination refs decide, so a lacking destination rejects" 1 \
 	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main 1111111111111111111111111111111111111111" origin "$D2")"
-assert_eq "8.8 a push reject gives the --amend hint for the listed commits" 1 "$(grep -c -- '--amend' "$WORK/last.out")"
+assert_eq "8.8 a push reject does not tell anyone to amend" 0 "$(grep -c -- '--amend' "$WORK/last.out")"
 assert_eq "8.7b a remote sha that the clone lacks: a destination that holds the private-email commit leaves it out" 0 \
 	"$(run_push "$R" "refs/heads/main $TOP refs/heads/main 1111111111111111111111111111111111111111" origin "$D1")"
 assert_eq "8.9 a known old tip needs no destination call: the URL is not read" 0 \
@@ -454,6 +475,59 @@ assert_eq "11.23 SKIP_COMMIT_LINT=1 does not bypass the trailer check" rejected 
 	"$(try_commit "$B2" SKIP_COMMIT_LINT=1 git commit -q --allow-empty -m "$BADBOTH")"
 assert_eq "11.24 a good subject with a good trailer passes both" accepted \
 	"$(try_commit "$B2" git commit -q --allow-empty -m "$(printf 'feat: ok\n\nCo-Authored-By: Claude <noreply@anthropic.com>')")"
+
+echo "=== 12. the reject text tells each reader how to fix the identity ==="
+# The text must give a command that the reader runs as is. With a signed-in gh it shows the derived
+# address. Without one it gives the steps to find the address. It never tells anyone to amend (the
+# rule for Claude is: never amend unless the user asks), and it tells an agent to ask the user first.
+DERIVED='123456+octo@users.noreply.github.com'
+echo "--- 12a. the helper"
+assert_eq "12.1 the helper prints the derived address of the signed-in gh user" "$DERIVED" \
+	"$(STUB_GH_USER="$DERIVED" bash "$GH_HELPER")"
+assert_eq "12.2 gh not signed in: the helper prints nothing and exits 0" "|0" \
+	"$(bash "$GH_HELPER" 2>/dev/null)|$?"
+mkdir -p "$WORK/emptybin"
+assert_eq "12.3 gh absent: the helper prints nothing and exits 0" "|0" \
+	"$(PATH="$WORK/emptybin" "$BASH" "$GH_HELPER" 2>/dev/null)|$?"
+# gh can print an error body that passes the jq filter and gives "null+null@...". The address is built here so that the file holds no such text.
+assert_eq "12.4 gh answers with something that is not an address: the helper prints nothing" "" \
+	"$(STUB_GH_USER="$(printf '%s+%s@%s' null null users.noreply.github.com)" bash "$GH_HELPER")"
+
+echo "--- 12b. a staged reject"
+T12="$WORK/fix12"
+make_repo "$T12" 1
+try_commit "$T12" STUB_GH_USER="$DERIVED" git commit -q --allow-empty --author="A <$BAD>" -m c12 >/dev/null
+assert_eq "12.5 signed-in gh: the text holds a command to run as is" 1 \
+	"$(grep -cFx -- "  git config user.email $DERIVED" "$WORK/last.out")"
+assert_eq "12.6 signed-in gh: the text holds no placeholder" 0 "$(grep -c '<id>' "$WORK/last.out")"
+try_commit "$T12" git commit -q --allow-empty --author="A <$BAD>" -m c12b >/dev/null
+assert_eq "12.7 no signed-in gh: the text gives both ways to find the address" "1 1" \
+	"$(grep -c 'gh auth login' "$WORK/last.out") $(grep -c 'https://github.com/settings/emails' "$WORK/last.out")"
+assert_eq "12.8 no signed-in gh: the text holds a command with the placeholder" 1 \
+	"$(grep -cFx -- '  git config user.email <id>+<login>@users.noreply.github.com' "$WORK/last.out")"
+assert_eq "12.9 the fix is for this repo: the text never says --global" 0 "$(grep -c -- '--global' "$WORK/last.out")"
+assert_eq "12.10 the text tells an agent to ask the user before it changes an identity" 1 \
+	"$(grep -c 'ask the user' "$WORK/last.out")"
+assert_eq "12.11 the staged text says to run git commit again" 1 "$(grep -c 'git commit again' "$WORK/last.out")"
+
+echo "--- 12c. a push reject"
+T12B="$(git -C "$T12" rev-parse HEAD)"
+try_commit "$T12" SKIP_EMAIL_CHECK=1 git commit -q --allow-empty --author="A <$BAD>" -m c12c >/dev/null
+T12H="$(git -C "$T12" rev-parse HEAD)"
+assert_eq "12.12 push mode rejects the commit" 1 "$(run_push "$T12" "refs/heads/main $T12H refs/heads/main $T12B")"
+assert_eq "12.13 the push text never says --amend" 0 "$(grep -c -- '--amend' "$WORK/last.out")"
+assert_eq "12.14 the push text says that existing commits keep their address, and that the owner decides" "1 1" \
+	"$(grep -c 'keep' "$WORK/last.out") $(grep -c 'owner decides' "$WORK/last.out")"
+assert_eq "12.15 the push text still shows how to set the identity" 1 "$(grep -c 'git config user.email' "$WORK/last.out")"
+(cd "$T12" && printf '%s\n' "refs/heads/main $T12H refs/heads/main $T12B" | STUB_GH_USER="$DERIVED" HOME="$TMP_HOME" bash "$PRE_PUSH" origin url) >"$WORK/last.out" 2>&1
+assert_eq "12.16 signed-in gh: the push text holds the same command to run as is" 1 \
+	"$(grep -cFx -- "  git config user.email $DERIVED" "$WORK/last.out")"
+git -C "$T12" reset -q --hard "$T12B"
+
+echo "--- 12d. a trailer reject"
+try_commit "$T12" git commit -q --allow-empty -m "$(printf 'feat: x\n\nCo-Authored-By: Pat <pat@example.com>')" >/dev/null
+assert_eq "12.17 a trailer reject says how to fix the trailer, and not the identity" "1 0" \
+	"$(grep -c 'Remove the trailer line' "$WORK/last.out") $(grep -c 'git config user.email' "$WORK/last.out")"
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -31,6 +31,10 @@
 # A trailer may also list noreply@anthropic.com, a public no-reply address that
 # tools write as a Co-Authored-By. The identity check does not accept it.
 #
+# A reject prints the fix. With a signed-in gh it shows the derived address (from
+# gh-noreply-address.sh) in a command to run as is. Without one it shows the steps
+# to find the address. It never tells anyone to amend.
+#
 # Bypass: SKIP_EMAIL_CHECK=1. Known limit: git commit --no-verify and git push
 # --no-verify skip this check.
 #
@@ -39,6 +43,7 @@
 set -euo pipefail
 
 MODE="${1:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ "${SKIP_EMAIL_CHECK:-0}" = "1" ] && exit 0
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 [ -f "$ROOT/.require-noreply-email" ] || exit 0
@@ -178,21 +183,36 @@ esac
 
 if [ "$bad" -eq 1 ]; then
 	if [ "$bad_id" -eq 1 ]; then
-		printf 'This repo requires one (.require-noreply-email). Fix the identity:\n' >&2
-		printf '  git config user.email <id>+<login>@users.noreply.github.com\n' >&2
-		if [ "$MODE" = staged ]; then
-			# Git did not make this commit, so --amend would change the previous commit.
-			printf 'Then run git commit again.\n' >&2
+		# The address of the signed-in gh user, or nothing. gh-noreply-address.sh is the one home of the command.
+		derived="$(bash "$HERE/gh-noreply-address.sh" 2>/dev/null || true)"
+		printf 'This repo requires a GitHub noreply address (.require-noreply-email).\n' >&2
+		if [ -n "$derived" ]; then
+			printf 'Your address, from the signed-in gh account, is %s. Set it for this repo:\n' "$derived" >&2
+			printf '  git config user.email %s\n' "$derived" >&2
 		else
-			printf 'Then redo each commit listed above. For the last commit:\n' >&2
-			printf '  git commit --amend --reset-author --no-edit\n' >&2
+			printf 'To find your noreply address, use one of these steps:\n' >&2
+			printf '  1. Run gh auth login, then run this command again.\n' >&2
+			printf '  2. Open https://github.com/settings/emails and copy your noreply address.\n' >&2
+			printf 'It has the form <id>+<login>@users.noreply.github.com. Set it for this repo:\n' >&2
+			printf '  git config user.email <id>+<login>@users.noreply.github.com\n' >&2
+		fi
+		if [ "$MODE" = push ]; then
+			printf 'This changes new commits only. Each commit listed above keeps its address.\n' >&2
+			printf 'To publish those commits, rewrite them. A rewrite changes history, so the owner decides.\n' >&2
+		else
+			printf 'Then run git commit again.\n' >&2
 		fi
 	fi
 	if [ "$bad_trailer" -eq 1 ]; then
 		printf 'This repo requires noreply addresses (.require-noreply-email), also in trailers.\n' >&2
 		printf 'Remove the trailer line, or use a noreply address in it.\n' >&2
-		[ "$MODE" = push ] || printf 'Then run git commit again.\n' >&2
+		if [ "$MODE" = push ]; then
+			printf 'Each commit listed above keeps its trailer. To publish those commits, rewrite them. The owner decides.\n' >&2
+		else
+			printf 'Then run git commit again.\n' >&2
+		fi
 	fi
+	printf 'Agents: show this fix to the user, and ask the user before you change any identity. Never change the global email.\n' >&2
 	printf 'Bypass for one command (owner only): SKIP_EMAIL_CHECK=1\n' >&2
 fi
 exit "$bad"
