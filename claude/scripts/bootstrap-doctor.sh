@@ -17,13 +17,14 @@
 # In checks 1 and 2 a line that starts with # does not count: the shell never reads it.
 # In check 2 the name must end at .bashrc: a line that sources only .bashrc.local does not count.
 #   4. each enabled plugin has a folder in ~/.claude/plugins/cache/
-#   5. when gh uses the ssh protocol, known_hosts holds a github.com key
+#   5. when gh uses the ssh protocol for github.com, or the origin remote of ~/anaiis-dotfiles is an
+#      SSH URL for github.com, known_hosts holds a github.com key
 #   6. when claude is on PATH, its version is at least 2.1.295 (onFailure support for PreToolUse guards)
 #   7. settings.json pins env.CLAUDE_CODE_SHELL to an executable bash whose major version is in
 #      APPROVED_BASH_MAJORS, and every command in it starts with ${CLAUDE_CODE_SHELL:-bash}
 #   8. sqlfmt runs, on PATH or in ~/.local/bin (WARN when it is absent or does not run)
 #
-# Tools used: dirname basename readlink grep jq gh ssh-keygen claude sqlfmt, and the pinned bash (check 7,
+# Tools used: dirname basename readlink grep jq gh git ssh-keygen claude sqlfmt, and the pinned bash (check 7,
 # by absolute path, run once with -c to print its major). ssh-keygen reads the passwd
 # home and ignores $HOME, so its call passes -f.
 
@@ -166,16 +167,28 @@ EOF
 fi
 
 # ---- 5. GitHub host key -----------------------------------------------------
+# The rule is the same as ssh_signals in install.sh. SSH is in use when the gh value for github.com is
+# ssh, or when the origin remote of the clone is an SSH URL for github.com. Change both together.
 if ! command -v gh >/dev/null 2>&1; then
 	ok "github.com host key (not needed: gh not found)"
 else
-	proto="$(gh config get git_protocol 2>/dev/null)" || proto=""
-	if [ "$proto" != "ssh" ]; then
-		ok "github.com host key (not needed: gh protocol is ${proto:-unset})"
+	proto="$(gh config get git_protocol --host github.com 2>/dev/null)" || proto=""
+	origin_url="$(git -C "$HOME/anaiis-dotfiles" remote get-url origin 2>/dev/null)" || origin_url=""
+	case "$origin_url" in
+		git@github.com:* | ssh://git@github.com/* | ssh://github.com/*) origin_kind=ssh ;;
+		https://* | http://*) origin_kind=https ;;
+		"") origin_kind=none ;;
+		*) origin_kind=other ;;
+	esac
+	reason=""
+	[ "$proto" = ssh ] && reason="gh protocol ssh"
+	[ "$origin_kind" = ssh ] && reason="${reason:+$reason, }origin remote ssh"
+	if [ -z "$reason" ]; then
+		ok "github.com host key (not needed: gh protocol ${proto:-unset}, origin $origin_kind)"
 	elif ssh-keygen -F github.com -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
-		ok "github.com host key"
+		ok "github.com host key ($reason)"
 	else
-		missing "github.com host key (~/.ssh/known_hosts)" "$FIX_KEYS"
+		missing "github.com host key (~/.ssh/known_hosts; $reason)" "$FIX_KEYS"
 	fi
 fi
 
