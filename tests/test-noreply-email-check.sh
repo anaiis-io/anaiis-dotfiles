@@ -534,26 +534,26 @@ echo "=== 13. review findings: bytes, signatures, credentials, and merges ==="
 # line in a UTF-8 locale, and a fail-open `|| true` then passed the commit.
 T13="$WORK/review13"
 make_repo "$T13" 1
-printf 'feat: x\n\nbody\n\nCo-authored-by: Zo\353 <bad@work.com>\n' >"$WORK/latin.msg"
+printf 'feat: x\n\nbody\n\nCo-authored-by: Zo\353 <bad@example.com>\n' >"$WORK/latin.msg"
 (cd "$T13" && LC_ALL=en_US.UTF-8 HOME="$TMP_HOME" bash "$REPO_DIR/claude/hooks/repo-commit-msg.sh" "$WORK/latin.msg") >"$WORK/last.out" 2>&1
 assert_eq "13.1 message mode: an invalid UTF-8 trailer line is still checked (UTF-8 locale)" "1 1" \
-	"$? $(grep -cF -- '"bad@work.com"' "$WORK/last.out")"
+	"$? $(grep -cF -- '"bad@example.com"' "$WORK/last.out")"
 T13A="$(git -C "$T13" rev-parse HEAD)"
 T13TREE="$(git -C "$T13" rev-parse 'HEAD^{tree}')"
 # A commit whose header names an encoding that git cannot convert keeps its raw bytes in git log.
-ENC_OBJ="$(printf 'tree %s\nparent %s\nauthor Octo <%s> 1700000000 +0000\ncommitter Octo <%s> 1700000000 +0000\nencoding bogus-enc\n\nfeat: enc\n\nCo-authored-by: Zo\353 <bad@work.com>\n' \
+ENC_OBJ="$(printf 'tree %s\nparent %s\nauthor Octo <%s> 1700000000 +0000\ncommitter Octo <%s> 1700000000 +0000\nencoding bogus-enc\n\nfeat: enc\n\nCo-authored-by: Zo\353 <bad@example.com>\n' \
 	"$T13TREE" "$T13A" "$NR" "$NR" | git -C "$T13" hash-object -t commit -w --stdin)"
 assert_eq "13.2 push mode: an invalid UTF-8 trailer line is still checked (UTF-8 locale)" "1 1" \
-	"$(LC_ALL=en_US.UTF-8 run_push "$T13" "refs/heads/main $ENC_OBJ refs/heads/main $T13A") $(grep -cF -- '"bad@work.com"' "$WORK/last.out")"
+	"$(LC_ALL=en_US.UTF-8 run_push "$T13" "refs/heads/main $ENC_OBJ refs/heads/main $T13A") $(grep -cF -- '"bad@example.com"' "$WORK/last.out")"
 
 # 13b. log.showSignature prints gpg text before each commit. The scan must still read the commit.
 mkdir -p "$WORK/gpgstub"
 cat >"$WORK/gpgstub/gpg" <<'STUB'
 #!/bin/sh
 echo '[GNUPG:] NEWSIG'
-echo '[GNUPG:] GOODSIG 0123456789ABCDEF Me <me@work.example.com>'
+echo '[GNUPG:] GOODSIG 0123456789ABCDEF Me <me@example.com>'
 echo '[GNUPG:] VALIDSIG 0123456789ABCDEF 2023-11-14 1700000000 0 4 0 1 8 00 0123456789ABCDEF'
-echo 'gpg: Good signature from "Me <me@work.example.com>"' >&2
+echo 'gpg: Good signature from "Me <me@example.com>"' >&2
 exit 0
 STUB
 chmod +x "$WORK/gpgstub/gpg"
@@ -564,7 +564,7 @@ git -C "$T13" config gpg.program "$WORK/gpgstub/gpg"
 assert_eq "13.3 log.showSignature=true: a signed commit with noreply addresses passes the push check" 0 \
 	"$(run_push "$T13" "refs/heads/main $SIG_OBJ refs/heads/main $T13A")"
 assert_eq "13.4 log.showSignature=true: the gpg text is not read as a trailer or as a header" 0 \
-	"$(grep -c 'unbound variable\|me@work.example.com' "$WORK/last.out")"
+	"$(grep -c 'unbound variable\|me@example.com' "$WORK/last.out")"
 git -C "$T13" config --unset log.showSignature
 git -C "$T13" config --unset gpg.program
 
