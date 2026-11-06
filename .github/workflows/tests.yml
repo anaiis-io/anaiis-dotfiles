@@ -1,0 +1,78 @@
+# Runs the repo's shell test suite on every pull request and on pushes to
+# main. macOS runner on purpose: the hooks under test use BSD-only forms
+# (date -j, stat -f) and only ever run on macOS. Public repo, so runner
+# minutes are free on GitHub-hosted standard runners, macOS included.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    permissions:
+      contents: read
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # jq, python3, git, and realpath ship with the image. shfmt and
+      # shellcheck may not; the lint-dispatch suites skip their cases when a
+      # tool is absent, which would silently drop coverage, so install only
+      # what is missing. Homebrew bash is a documented prerequisite
+      # (Brewfile): /bin/bash is 3.2 on macOS and statusline-command.sh uses
+      # namerefs (Bash 4.3+), so a runner whose PATH bash is 3.2 renders
+      # nothing there. Prepending the brew prefix makes later steps, and the
+      # `bash <script>` calls inside the suites, pick up the newer bash.
+      # The step installs bash when the pinned path in claude/settings.json
+      # (env.CLAUDE_CODE_SHELL) is absent, and fails when the path is still
+      # absent afterwards. When Homebrew ships a bash major above
+      # APPROVED_BASH_MAJORS (claude/scripts/bootstrap-doctor.sh), tests/
+      # test-bash-baseline.sh fails on purpose until the owner approves it.
+      - name: Install tools missing from the runner image
+        run: |
+          for tool in shfmt shellcheck; do
+            command -v "$tool" >/dev/null 2>&1 || brew install "$tool"
+          done
+          pin="$(jq -r '.env.CLAUDE_CODE_SHELL // empty' claude/settings.json)"
+          [ -x "$pin" ] || brew install bash
+          [ -x "$pin" ] || { echo "the pin '$pin' is not executable after brew install bash"; exit 1; }
+          echo "$(brew --prefix)/bin" >>"$GITHUB_PATH"
+          "$pin" --version | head -1
+
+      # Several hooks and the memory doctor resolve ~/.claude/* at runtime;
+      # the installer's CI mode builds only that symlink tree.
+      - name: Build the ~/.claude tree
+        run: bash install.sh --symlinks-only
+
+      - name: Run the test suite
+        run: bash tests/run-all.sh
+
+      # A fresh Mac starts on bash 3.2 (/bin/bash). run-all.sh uses the bash that comes
+      # first on PATH, which is Homebrew bash after the install step above. This step
+      # runs the bootstrap suites with /bin/bash and stops at the first failure. The suites
+      # also start a bare `bash` for the hook or the installer, so /bin goes first on PATH.
+      - name: Run the bootstrap suites on bash 3.2
+        run: |
+          export PATH="/bin:$PATH"
+          echo "bare bash on PATH: $(bash -c 'printf "%s" "$BASH_VERSION"')"
+          for t in \
+            test-brew-sync \
+            test-maintenance-check \
+            test-install-bashrc \
+            test-install-hostkeys \
+            test-bootstrap-doctor \
+            test-no-stale-refs \
+            test-noreply-email-check \
+            test-install-fresh-home; do
+            echo "=== /bin/bash tests/$t.sh ==="
+            /bin/bash "tests/$t.sh" || exit 1
+          done

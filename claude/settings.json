@@ -1,0 +1,325 @@
+{
+    "skillListingBudgetFraction": 0.1,
+    "env": {
+        "CLAUDE_CODE_SHELL": "/opt/homebrew/bin/bash"
+    },
+    "attribution": {
+        "commit": "",
+        "pr": ""
+    },
+    "permissions": {
+        "allow": [
+            "Read",
+            "WebSearch",
+            "WebFetch(domain:docs.coderabbit.ai)",
+            "Bash(git:*)",
+            "Bash(git -C *)",
+            "Bash(ALLOW_LOCK_COMMIT=1 git commit*)",
+            "Bash(python:*)",
+            "Bash(python3:*)",
+            "Bash(ls:*)",
+            "Bash(cd:*)",
+            "Bash(tree:*)",
+            "Bash(wc:*)",
+            "Bash(diff:*)",
+            "Bash(sort:*)",
+            "Bash(uniq:*)",
+            "Bash(cut:*)",
+            "Bash(file:*)",
+            "Bash(which:*)",
+            "Bash(date:*)",
+            "Bash(make:*)",
+            "Bash(gh:*)",
+            "Bash(jq:*)",
+            "Bash(duckdb:*)",
+            "Bash(textutil:*)",
+            "Bash(coderabbit:*)",
+            "Bash(graphify:*)",
+            "Bash(direnv:*)",
+            "Bash(uv:*)",
+            "Bash(uvr:*)",
+            "Bash(tmux capture-pane *)",
+            "Bash(dbt parse *)",
+            "Bash(dbt compile *)",
+            "Bash(bq show *)",
+            "Bash(bq ls *)",
+            "Bash(bq ls)",
+            "Bash(bq query *)",
+            "Bash(bq head *)",
+            "Bash(bq version)",
+            "Bash(gcloud auth list)",
+            "Bash(gcloud config *)",
+            "Bash(gcloud projects list *)",
+            "Bash(gcloud projects describe *)",
+            "Bash(gcloud compute instances list *)",
+            "Bash(gcloud compute instances describe *)",
+            "Bash(gcloud storage buckets list *)",
+            "Bash(gcloud storage buckets describe *)",
+            "Bash(gcloud iam service-accounts list *)",
+            "Bash(gcloud iam service-accounts describe *)",
+            "Bash(gcloud iam roles list *)",
+            "Bash(gcloud iam roles describe *)",
+            "Bash(gcloud services list *)",
+            "Bash(gcloud services describe *)",
+            "Bash(gcloud sql instances list *)",
+            "Bash(gcloud sql instances describe *)"
+        ],
+        "deny": [
+            "Bash(git clean -f*)",
+            "Bash(gh repo delete*)",
+            "Bash(gh auth logout*)",
+            "Bash(sudo *)",
+            "Bash(brew uninstall*)",
+            "Bash(brew remove*)",
+            "Bash(pip install*)",
+            "Bash(pip uninstall*)",
+            "Bash(pip3 install*)",
+            "Bash(pip3 uninstall*)",
+            "Bash(docker rm*)",
+            "Bash(docker rmi*)",
+            "Bash(docker system prune*)",
+            "Bash(kubectl delete*)",
+            "Bash(terraform apply*)",
+            "Bash(terraform destroy*)",
+            "Read(**/*.key)",
+            "Edit(**/*.key)",
+            "Read(**/*.pem)",
+            "Edit(**/*.pem)",
+            "Read(**/*credentials*)",
+            "Edit(**/*credentials*)",
+            "Read(**/secrets/**)",
+            "Edit(**/secrets/**)",
+            "Read(**/.ssh/**)",
+            "Edit(**/.ssh/**)",
+            "Read(~/.bashrc)",
+            "Edit(~/.bashrc)",
+            "Read(~/.bashrc.local)",
+            "Edit(~/.bashrc.local)",
+            "Read(~/.bash_profile)",
+            "Edit(~/.bash_profile)",
+            "Read(~/.zshrc)",
+            "Edit(~/.zshrc)",
+            "Read(~/.zshrc.local)",
+            "Edit(~/.zshrc.local)",
+            "Read(~/.profile)",
+            "Edit(~/.profile)",
+            "Read(~/.aws/**)",
+            "Edit(~/.aws/**)",
+            "Read(~/.config/gcloud/**)",
+            "Edit(~/.config/gcloud/**)",
+            "Read(~/.config/secrets/**)",
+            "Edit(~/.config/secrets/**)",
+            "Read(~/.netrc)",
+            "Edit(~/.netrc)",
+            "Read(~/.gnupg/**)",
+            "Edit(~/.gnupg/**)",
+            "Read(~/.docker/**)",
+            "Edit(~/.docker/**)",
+            "Read(~/.kube/**)",
+            "Edit(~/.kube/**)",
+            "Read(~/.npmrc)",
+            "Edit(~/.npmrc)",
+            "Read(~/.pypirc)",
+            "Edit(~/.pypirc)",
+            "Read(~/.config/gh/**)",
+            "Edit(~/.config/gh/**)"
+        ],
+        "defaultMode": "bypassPermissions",
+        "disableAutoMode": "disable"
+    },
+    "skillOverrides": {
+        "dbt:configuring-dbt-mcp-server": "user-invocable-only",
+        "dbt:working-with-dbt-mesh": "off"
+    },
+    "hooks": {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/maintenance-check.sh"
+                    }
+                ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/ensure-repo-hooks.sh"
+                    }
+                ]
+            },
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/list-merged-claude-branches.sh"
+                    }
+                ]
+            }
+        ],
+        "SessionStart": [
+            {
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/session-start-context.sh"
+                    }
+                ]
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Edit|Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/post-edit-lint.sh"
+                    }
+                ]
+            },
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/context-watch.sh"
+                    }
+                ]
+            }
+        ],
+        "PreToolUse": [
+            {
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/block-em-dash.sh",
+                        "onFailure": "block"
+                    },
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/block-edit-on-main.sh",
+                        "onFailure": "block"
+                    }
+                ]
+            },
+            {
+                "matcher": "ExitPlanMode",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/block-em-dash.sh",
+                        "onFailure": "block"
+                    }
+                ]
+            },
+            {
+                "matcher": "Read|Write|Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/block-sensitive-writes.sh",
+                        "onFailure": "block"
+                    }
+                ]
+            },
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/bash-guard.sh",
+                        "onFailure": "block"
+                    }
+                ]
+            },
+            {
+                "matcher": "Agent|WebFetch",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/cost-guard.sh",
+                        "onFailure": "block"
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/stop-hook-git-check.sh"
+                    }
+                ]
+            }
+        ],
+        "PreCompact": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/hooks/pre-compact.sh"
+                    }
+                ]
+            }
+        ]
+    },
+    "statusLine": {
+        "type": "command",
+        "command": "${CLAUDE_CODE_SHELL:-bash} $HOME/.claude/scripts/statusline-command.sh"
+    },
+    "enabledPlugins": {
+        "frontend-design@claude-plugins-official": true,
+        "anaiis-review@anaiis-plugins": true,
+        "anaiis-git-ops@anaiis-plugins": true,
+        "anaiis-data@anaiis-plugins": true,
+        "anaiis-writing@anaiis-plugins": true,
+        "anaiis-meta@anaiis-plugins": true,
+        "agent-skills@addy-agent-skills": true,
+        "typesafe@typesafe-ai": true,
+        "ponytail@ponytail": true
+    },
+    "extraKnownMarketplaces": {
+        "ponytail": {
+            "source": {
+                "source": "github",
+                "repo": "DietrichGebert/ponytail"
+            }
+        },
+        "anaiis-plugins": {
+            "source": {
+                "source": "github",
+                "repo": "datasci-iopsy/anaiis-plugins"
+            }
+        },
+        "dbt-agent-marketplace": {
+            "source": {
+                "source": "github",
+                "repo": "dbt-labs/dbt-agent-skills"
+            }
+        },
+        "addy-agent-skills": {
+            "source": {
+                "source": "github",
+                "repo": "addyosmani/agent-skills"
+            }
+        },
+        "typesafe-ai": {
+            "source": {
+                "source": "github",
+                "repo": "typesafe-ai/skills"
+            }
+        }
+    },
+    "tui": "fullscreen",
+    "skipDangerousModePermissionPrompt": true,
+    "autoCompactEnabled": true,
+    "remoteControlAtStartup": false,
+    "inputNeededNotifEnabled": true,
+    "agentPushNotifEnabled": true,
+    "theme": "dark"
+}
