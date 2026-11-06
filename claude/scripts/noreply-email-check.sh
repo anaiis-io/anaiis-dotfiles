@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# noreply-email-check.sh -- reject a commit identity that is not a GitHub noreply address.
+# noreply-email-check.sh -- reject a commit identity or a trailer address that is not a GitHub noreply address.
 #
 # Opt-in: runs only in a repo whose root holds the file .require-noreply-email.
 # Elsewhere it exits 0, so a work repo keeps its work address.
@@ -19,9 +19,17 @@
 #           holds. It never trusts the refs of another remote. If ls-remote fails or
 #           runs past NOREPLY_LS_REMOTE_TIMEOUT seconds (default 15), the check
 #           skips nothing and scans every pushed commit.
+#   message (repo-commit-msg.sh) checks the trailers of the message file that git
+#           gives to commit-msg. Usage: message <file>.
+#
+# Both push and message also check every <...@...> address in any trailer of the
+# message (Co-Authored-By, Signed-off-by, Reviewed-by, and so on). An address in
+# the body outside the trailers is not checked.
 #
 # Accepted: <id>+<login>@users.noreply.github.com, <login>@users.noreply.github.com
 # (a [bot] suffix allowed), and noreply@github.com (commits made on GitHub).
+# A trailer may also list noreply@anthropic.com, a public no-reply address that
+# tools write as a Co-Authored-By. The identity check does not accept it.
 #
 # Bypass: SKIP_EMAIL_CHECK=1. Known limit: git commit --no-verify and git push
 # --no-verify skip this check.
@@ -37,12 +45,34 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
 NOREPLY_RE='^([0-9]+\+)?[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?@users\.noreply\.github\.com$'
 bad=0
+bad_id=0
+bad_trailer=0
 
-check() { # <what> <address>: report the address and set bad=1 when it is not noreply
+check() { # <what> <address> [trailer]: report the address and set bad when it is not noreply
 	[ "$2" = "noreply@github.com" ] && return 0
 	[[ "$2" =~ $NOREPLY_RE ]] && return 0
-	printf 'noreply-email-check: %s uses "%s", which is not a GitHub noreply address.\n' "$1" "$2" >&2
+	if [ "${3:-}" = trailer ]; then
+		printf 'noreply-email-check: %s lists "%s", which is not a GitHub noreply address.\n' "$1" "$2" >&2
+		bad_trailer=1
+	else
+		printf 'noreply-email-check: %s uses "%s", which is not a GitHub noreply address.\n' "$1" "$2" >&2
+		bad_id=1
+	fi
 	bad=1
+}
+
+# check_trailer_line <where> <trailer line>: check each <...@...> address in one trailer line.
+check_trailer_line() {
+	local token="${2%%:*}" addr
+	while IFS= read -r addr; do
+		[ -n "$addr" ] || continue
+		addr="${addr#<}"
+		addr="${addr%>}"
+		[ "$addr" = "noreply@anthropic.com" ] && continue
+		check "$1 trailer \"$token\"" "$addr" trailer
+	done <<EOF
+$(printf '%s\n' "$2" | grep -o '<[^<>]*@[^<>]*>' || true)
+EOF
 }
 
 # destination_tips <url>: print each commit that the destination advertises and this clone holds.
@@ -106,32 +136,62 @@ case "$MODE" in
 				{
 					printf '%s\n' "$local_sha"
 					for tip in $known; do printf '^%s\n' "$tip"; done
-				} | git log --format='%H %ae %ce' --stdin
+				} | git log --format='@@%H %ae %ce%n%(trailers:only,unfold)' --stdin
 			)"
-			while read -r sha ae ce; do
-				[ -n "$sha" ] || continue
-				check "commit ${sha:0:12} (author)" "$ae"
-				check "commit ${sha:0:12} (committer)" "$ce"
+			# One "@@<sha> <author> <committer>" line per commit, then its trailer lines. A trailer
+			# starts with a word and a colon, so no trailer line starts with "@@".
+			while IFS= read -r line; do
+				case "$line" in
+					@@*)
+						rest="${line#@@}"
+						sha="${rest%% *}"
+						rest="${rest#* }"
+						check "commit ${sha:0:12} (author)" "${rest%% *}"
+						check "commit ${sha:0:12} (committer)" "${rest#* }"
+						;;
+					"") ;;
+					*) check_trailer_line "commit ${sha:0:12}" "$line" ;;
+				esac
 			done <<EOF
 $commits
 EOF
 		done
 		;;
+	message)
+		[ -f "${2:-}" ] || {
+			echo "Usage: noreply-email-check.sh message <file>" >&2
+			exit 2
+		}
+		trailers="$(git interpret-trailers --parse <"$2")"
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			check_trailer_line "the commit message" "$line"
+		done <<EOF
+$trailers
+EOF
+		;;
 	*)
-		echo "Usage: noreply-email-check.sh <staged|push>" >&2
+		echo "Usage: noreply-email-check.sh <staged|push|message>" >&2
 		exit 2
 		;;
 esac
 
 if [ "$bad" -eq 1 ]; then
-	printf 'This repo requires one (.require-noreply-email). Fix the identity:\n' >&2
-	printf '  git config user.email <id>+<login>@users.noreply.github.com\n' >&2
-	if [ "$MODE" = staged ]; then
-		# Git did not make this commit, so --amend would change the previous commit.
-		printf 'Then run git commit again.\n' >&2
-	else
-		printf 'Then redo each commit listed above. For the last commit:\n' >&2
-		printf '  git commit --amend --reset-author --no-edit\n' >&2
+	if [ "$bad_id" -eq 1 ]; then
+		printf 'This repo requires one (.require-noreply-email). Fix the identity:\n' >&2
+		printf '  git config user.email <id>+<login>@users.noreply.github.com\n' >&2
+		if [ "$MODE" = staged ]; then
+			# Git did not make this commit, so --amend would change the previous commit.
+			printf 'Then run git commit again.\n' >&2
+		else
+			printf 'Then redo each commit listed above. For the last commit:\n' >&2
+			printf '  git commit --amend --reset-author --no-edit\n' >&2
+		fi
+	fi
+	if [ "$bad_trailer" -eq 1 ]; then
+		printf 'This repo requires noreply addresses (.require-noreply-email), also in trailers.\n' >&2
+		printf 'Remove the trailer line, or use a noreply address in it.\n' >&2
+		[ "$MODE" = push ] || printf 'Then run git commit again.\n' >&2
 	fi
 	printf 'Bypass for one command (owner only): SKIP_EMAIL_CHECK=1\n' >&2
 fi

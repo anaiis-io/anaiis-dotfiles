@@ -38,7 +38,8 @@ if [ "$SENDS_COMMITS" -eq 0 ]; then
 fi
 
 # Identity before the suite: in a repo with .require-noreply-email, reject a push
-# that sends a commit whose author or committer email is not a GitHub noreply address.
+# that sends a commit whose author or committer email, or an address in a trailer
+# of its message, is not a GitHub noreply address.
 printf '%s\n' "$PUSH_LINES" | bash "$HOME/.claude/scripts/noreply-email-check.sh" push "${1:-}" "${2:-}"
 
 # Run the test suite if the repo has one. SKIP_TESTS=1 to bypass.

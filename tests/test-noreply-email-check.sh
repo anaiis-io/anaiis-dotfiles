@@ -365,6 +365,96 @@ S4_SUM="$(cksum <"$S4/.git/hooks/pre-push")"
 (cd "$S4" && HOME="$TMP_HOME" bash "$INSTALLER" >/dev/null 2>&1)
 assert_eq "10.10 a customised dispatcher line is left alone" "$S4_SUM" "$(cksum <"$S4/.git/hooks/pre-push")"
 
+echo "=== 11. addresses in commit message trailers ==="
+# An address in a trailer is published like an author email. The commit-msg hook checks the commit that
+# is about to exist. Push mode checks commits that already exist. Both run only behind the same marker.
+# The scan covers every <...@...> address in any trailer. Allowed: the noreply shapes of the identity
+# check, plus noreply@anthropic.com (a public no-reply address, written by tools as a Co-Authored-By).
+T="$WORK/trailers"
+make_repo "$T" 1
+NOMSG="$(printf 'feat: x\n\nbody\n\nCo-Authored-By: Pat <pat@example.com>')"
+assert_eq "11.1 a hand-written Co-Authored-By with a work address is rejected at commit time" rejected \
+	"$(try_commit "$T" git commit -q --allow-empty -m "$NOMSG")"
+assert_eq "11.2 the message names the trailer and the address" "1 1" \
+	"$(grep -cF 'trailer "Co-Authored-By"' "$WORK/last.out") $(grep -cF -- '"pat@example.com"' "$WORK/last.out")"
+assert_eq "11.3 any trailer token counts: a Reviewed-by with a work address is rejected" rejected \
+	"$(try_commit "$T" git commit -q --allow-empty -m "$(printf 'feat: x\n\nbody\n\nReviewed-by: Rae <rae@example.com>')")"
+assert_eq "11.4 the message names the Reviewed-by token" 1 "$(grep -cF 'trailer "Reviewed-by"' "$WORK/last.out")"
+GOODMSG="$(printf 'feat: x\n\nbody\n\nCo-Authored-By: A <%s>\nCo-Authored-By: B <%s>\nCo-Authored-By: C <noreply@github.com>\nCo-Authored-By: Claude <noreply@anthropic.com>\nSigned-off-by: D <41898282+github-actions[bot]@users.noreply.github.com>' "$NR" "$NR2")"
+assert_eq "11.5 noreply and Anthropic trailers pass" accepted "$(try_commit "$T" git commit -q --allow-empty -m "$GOODMSG")"
+assert_eq "11.6 an address in the body, outside the trailers, is not checked" accepted \
+	"$(try_commit "$T" git commit -q --allow-empty -m "$(printf 'feat: x\n\nAsk pat <pat@example.com> about this.\n\nRefs: #1')")"
+assert_eq "11.7 SKIP_EMAIL_CHECK=1 bypasses the trailer check" accepted \
+	"$(try_commit "$T" SKIP_EMAIL_CHECK=1 git commit -q --allow-empty -m "$NOMSG")"
+git -C "$T" reset -q --hard HEAD~1
+
+# git commit -s signs with the committer identity. A noreply identity gives a noreply sign-off. A work
+# identity cannot pass pre-commit, so the work sign-off is made in an unmarked repo, and its message is
+# handed to the commit-msg dispatcher of the marked repo.
+assert_eq "11.8 git commit -s with a noreply identity passes" accepted \
+	"$(try_commit "$T" git commit -q --allow-empty -s -m 'feat: signed')"
+SG="$WORK/signer"
+make_repo "$SG" 0
+try_commit "$SG" GIT_COMMITTER_EMAIL=q@example.com git commit -q --allow-empty -s -m 'feat: signed' >/dev/null
+git -C "$SG" log -1 --format=%B >"$WORK/signed.msg"
+assert_eq "11.9 the sign-off of a work identity is in the message that git wrote" 1 "$(grep -cF 'Signed-off-by:' "$WORK/signed.msg")"
+(cd "$T" && HOME="$TMP_HOME" bash "$REPO_DIR/claude/hooks/repo-commit-msg.sh" "$WORK/signed.msg") >"$WORK/last.out" 2>&1
+SIGN_RC=$?
+assert_eq "11.10 the commit-msg hook rejects that sign-off and names the trailer and address" "1 1 1" \
+	"$SIGN_RC $(grep -cF 'trailer "Signed-off-by"' "$WORK/last.out") $(grep -cF -- '"q@example.com"' "$WORK/last.out")"
+
+echo "--- 11b. push mode"
+TBASE="$(git -C "$T" rev-parse HEAD)"
+try_commit "$T" SKIP_EMAIL_CHECK=1 git commit -q --allow-empty -m "$NOMSG" >/dev/null
+assert_eq "11.11 push mode rejects a pushed commit with a work address in a trailer" 1 \
+	"$(run_push "$T" "refs/heads/main $(git -C "$T" rev-parse HEAD) refs/heads/main $TBASE")"
+assert_eq "11.12 the push message names the trailer and the address" "1 1" \
+	"$(grep -cF 'trailer "Co-Authored-By"' "$WORK/last.out") $(grep -cF -- '"pat@example.com"' "$WORK/last.out")"
+assert_eq "11.13 the suite does not run after that reject" 0 "$([ -e "$T/.suite-ran" ] && echo 1 || echo 0)"
+git -C "$T" reset -q --hard "$TBASE"
+try_commit "$T" git commit -q --allow-empty -m "$GOODMSG" >/dev/null
+assert_eq "11.14 push mode accepts noreply and Anthropic trailers" 0 \
+	"$(run_push "$T" "refs/heads/main $(git -C "$T" rev-parse HEAD) refs/heads/main $TBASE")"
+git -C "$T" reset -q --hard "$TBASE"
+# A commit made with --no-verify and -s under a work committer identity: the sign-off reaches history.
+# The identity check rejects it too, so 11.16 is the case that proves the trailer check.
+try_commit "$T" GIT_COMMITTER_EMAIL=q@example.com git commit -q --no-verify --allow-empty -s -m 'feat: signed' >/dev/null
+assert_eq "11.15 push mode rejects a git commit -s sign-off with a work address" 1 \
+	"$(run_push "$T" "refs/heads/main $(git -C "$T" rev-parse HEAD) refs/heads/main $TBASE")"
+assert_eq "11.16 the push message names the Signed-off-by trailer" 1 "$(grep -cF 'trailer "Signed-off-by"' "$WORK/last.out")"
+git -C "$T" reset -q --hard "$TBASE"
+# A cherry-pick copies the message, trailers included. It runs no commit-msg hook, so only push mode sees it.
+git -C "$T" checkout -q -b side
+printf 'side\n' >"$T/side.txt"
+git -C "$T" add side.txt
+try_commit "$T" SKIP_EMAIL_CHECK=1 git commit -q -m "$NOMSG" >/dev/null
+git -C "$T" checkout -q main
+try_commit "$T" git cherry-pick side >/dev/null
+assert_eq "11.17 the cherry-picked commit carries the work trailer" 1 "$(git -C "$T" log -1 --format=%B | grep -cF 'pat@example.com')"
+assert_eq "11.18 push mode rejects the cherry-picked commit" 1 \
+	"$(run_push "$T" "refs/heads/main $(git -C "$T" rev-parse HEAD) refs/heads/main $TBASE")"
+git -C "$T" reset -q --hard "$TBASE"
+
+echo "--- 11c. no marker, and the dispatcher"
+assert_eq "11.19 a repo without the marker accepts a work trailer" accepted \
+	"$(try_commit "$N" git commit -q --allow-empty -m "$NOMSG")"
+assert_eq "11.20 push mode ignores the trailer in a repo without the marker" 0 \
+	"$(run_push "$N" "refs/heads/main $(git -C "$N" rev-parse HEAD) refs/heads/main $NPARENT")"
+# A repo with both markers runs the message lint and the trailer check. Neither hides the other, and
+# SKIP_COMMIT_LINT=1 bypasses the lint only.
+B2="$WORK/both"
+make_repo "$B2" 1
+printf '# opt-in marker for claude/scripts/commit-msg-lint.sh\n' >"$B2/.conventional-commits"
+BADBOTH="$(printf 'bad message\n\nCo-Authored-By: Pat <pat@example.com>')"
+assert_eq "11.21 with both markers a bad subject and a bad trailer are rejected" rejected \
+	"$(try_commit "$B2" git commit -q --allow-empty -m "$BADBOTH")"
+assert_eq "11.22 the output reports the trailer and the lint rules" "1 1" \
+	"$(grep -cF 'trailer "Co-Authored-By"' "$WORK/last.out") $(grep -c 'commit-msg-lint: R1' "$WORK/last.out")"
+assert_eq "11.23 SKIP_COMMIT_LINT=1 does not bypass the trailer check" rejected \
+	"$(try_commit "$B2" SKIP_COMMIT_LINT=1 git commit -q --allow-empty -m "$BADBOTH")"
+assert_eq "11.24 a good subject with a good trailer passes both" accepted \
+	"$(try_commit "$B2" git commit -q --allow-empty -m "$(printf 'feat: ok\n\nCo-Authored-By: Claude <noreply@anthropic.com>')")"
+
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
