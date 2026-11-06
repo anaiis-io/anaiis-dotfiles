@@ -142,6 +142,8 @@ make_bin "$TMPD/bin-nosqlfmt" dirname basename readlink grep git jq ssh-keygen g
 # ---- Fixture HOME -----------------------------------------------------------
 ssh-keygen -q -t ed25519 -N '' -C '' -f "$TMPD/hostkey" >/dev/null
 KEYTEXT="$(awk '{print $1, $2}' "$TMPD/hostkey.pub")"
+# The one term in the fixture terms file. The doctor must never print it.
+TERM_SECRET='zz-fixture-term'
 # A healthy settings.json: two enabled plugins and one disabled, a pin to the stub bash, and two
 # commands (a hook and the status line) that start with the pin prefix.
 STUB_PIN="$TMPD/stub/bash"
@@ -178,6 +180,8 @@ build_home() {
 	# shellcheck disable=SC2016 # $HOME stays literal
 	printf '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >"$h/.bash_profile"
 	printf 'github.com %s\n' "$KEYTEXT" >"$h/.ssh/known_hosts"
+	mkdir -p "$h/.config/anaiis-dotfiles"
+	printf '%s\n' "$TERM_SECRET" >"$h/.config/anaiis-dotfiles/employer-terms.txt"
 	printf '%s\n' "$h"
 }
 
@@ -186,8 +190,11 @@ build_home() {
 # global answer. BIN_DIR (default $TMPD/bin) sets PATH.
 # CLAUDE_V (default: a new version) sets the line that the stub claude prints for --version.
 # SQLFMT_V (default: version 0.32.0) sets the line that the stub sqlfmt prints. Empty makes it fail.
+# TERMS_ENV and TERMS_XDG (default empty) set EMPLOYER_TERMS_FILE and XDG_CONFIG_HOME, so the real
+# environment of the machine never reaches the doctor.
 doctor() {
 	OUT="$(HOME="$1" PATH="${BIN_DIR:-$TMPD/bin}" STUB_PROTOCOL="${PROTO-ssh}" STUB_GLOBAL_PROTOCOL="${PROTO_GLOBAL-https}" \
+		EMPLOYER_TERMS_FILE="${TERMS_ENV-}" XDG_CONFIG_HOME="${TERMS_XDG-}" \
 		STUB_CLAUDE_VERSION="${CLAUDE_V-2.1.318 (Claude Code)}" STUB_BASH_V="${STUB_BASH_V-$FIRST}" STUB_SQLFMT_V="${SQLFMT_V-sqlfmt, version 0.32.0}" "$BASH" "$DOCTOR" 2>&1)"
 	RC=$?
 }
@@ -232,7 +239,7 @@ assert_eq "0.2 no MISSING line" 0 "$(miss_count)"
 assert_eq "0.3 summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
 # 2 bashrc + 1 login + 8 links + 1 memory folder + 2 enabled plugins + 1 host key + 1 claude version
 # + 1 harness bash pin + 1 hook command prefix + 1 sqlfmt. The disabled plugin is not listed.
-assert_eq "0.4 nineteen ok lines" 19 "$(ok_count)"
+assert_eq "0.4 twenty ok lines" 20 "$(ok_count)"
 assert_eq "0.5 the disabled plugin is not checked" 0 "$(printf '%s\n' "$OUT" | grep -c 'off@mk3' || true)"
 assert_eq "0.6 the HOME is unchanged" "$SNAP0" "$(snapshot "$H0")"
 assert_eq "0.7 a real memory folder is ok" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok ~/.claude/memory (local folder)$' || true)"
@@ -577,6 +584,41 @@ assert_eq "10.7 --version fails: exit code 0" 0 "$RC"
 assert_eq "10.8 --version fails: the one WARN line" "WARN sqlfmt ($TMPD/bin/sqlfmt does not run): $FIX_SQLFMT" "$(warn_lines)"
 SQLFMT_V="usage: sqlfmt [OPTIONS]" doctor "$H0"
 assert_eq "10.9 other text: the one WARN line" "WARN sqlfmt ($TMPD/bin/sqlfmt does not run): $FIX_SQLFMT" "$(warn_lines)"
+
+echo "--- 11. the employer terms file"
+# tests/test-public-tree.sh scans the tracked tree for the terms in this file, and it skips the scan when
+# the file is absent or empty. A reader could think the guard ran when it did not (issue 15). The doctor
+# reads the same path as that suite: EMPLOYER_TERMS_FILE, else $XDG_CONFIG_HOME or ~/.config, then
+# anaiis-dotfiles/employer-terms.txt. A gap is a WARN. The doctor never prints a term.
+FIX_TERMS='list one employer term per line in ~/.config/anaiis-dotfiles/employer-terms.txt, or set EMPLOYER_TERMS_FILE. Without terms, tests/test-public-tree.sh skips its employer check.'
+H="$(build_home)"
+doctor "$H"
+assert_eq "11.1 a file with a term: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
+assert_eq "11.2 a file with a term: no WARN line" "" "$(warn_lines)"
+assert_eq "11.3 the output never holds a term" 0 "$(printf '%s\n' "$OUT" | grep -c -F -- "$TERM_SECRET" || true)"
+H="$(build_home)"
+rm "$H/.config/anaiis-dotfiles/employer-terms.txt"
+SNAPT="$(snapshot "$H")"
+doctor "$H"
+assert_eq "11.4 absent: exit code 0" 0 "$RC"
+assert_eq "11.5 absent: the one WARN line" "WARN employer terms file (absent): $FIX_TERMS" "$(warn_lines)"
+assert_eq "11.6 absent: summary line" "doctor: 0 missing" "$(printf '%s\n' "$OUT" | tail -n 1)"
+assert_eq "11.7 absent: the HOME is unchanged" "$SNAPT" "$(snapshot "$H")"
+printf '\n  \n\t\n' >"$H/.config/anaiis-dotfiles/employer-terms.txt"
+doctor "$H"
+assert_eq "11.8 only blank lines: the one WARN line" "WARN employer terms file (empty): $FIX_TERMS" "$(warn_lines)"
+assert_eq "11.9 only blank lines: exit code 0" 0 "$RC"
+H="$(build_home)"
+rm "$H/.config/anaiis-dotfiles/employer-terms.txt"
+printf '%s\n' "$TERM_SECRET" >"$H/custom-terms.txt"
+TERMS_ENV="$H/custom-terms.txt" doctor "$H"
+assert_eq "11.10 EMPLOYER_TERMS_FILE names the file: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
+mkdir -p "$H/xdg/anaiis-dotfiles"
+printf '%s\n' "$TERM_SECRET" >"$H/xdg/anaiis-dotfiles/employer-terms.txt"
+TERMS_XDG="$H/xdg" doctor "$H"
+assert_eq "11.11 XDG_CONFIG_HOME moves the default folder: the ok line" 1 "$(printf '%s\n' "$OUT" | grep -c '^ok employer terms file$' || true)"
+TERMS_ENV="$H/missing.txt" doctor "$H"
+assert_eq "11.12 EMPLOYER_TERMS_FILE names an absent file: the WARN line" "WARN employer terms file (absent): $FIX_TERMS" "$(warn_lines)"
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

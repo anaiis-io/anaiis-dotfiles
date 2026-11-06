@@ -23,6 +23,8 @@
 #   7. settings.json pins env.CLAUDE_CODE_SHELL to an executable bash whose major version is in
 #      APPROVED_BASH_MAJORS, and every command in it starts with ${CLAUDE_CODE_SHELL:-bash}
 #   8. sqlfmt runs, on PATH or in ~/.local/bin (WARN when it is absent or does not run)
+#   9. the employer terms file has a term (WARN when it is absent or empty; tests/test-public-tree.sh
+#      skips its employer check without it)
 #
 # Tools used: dirname basename readlink grep jq gh git ssh-keygen claude sqlfmt, and the pinned bash (check 7,
 # by absolute path, run once with -c to print its major). ssh-keygen reads the passwd
@@ -53,6 +55,7 @@ FIX_MAJOR='install an approved bash (brew install bash), or approve this major b
 # shellcheck disable=SC2016 # ${...} stays literal: the user pastes this text into settings.json
 FIX_PREFIX='start each command in ~/anaiis-dotfiles/claude/settings.json with ${CLAUDE_CODE_SHELL:-bash} (a bare bash follows PATH)'
 FIX_SQLFMT='uv tool install shandy-sqlfmt'
+FIX_TERMS='list one employer term per line in ~/.config/anaiis-dotfiles/employer-terms.txt, or set EMPLOYER_TERMS_FILE. Without terms, tests/test-public-tree.sh skips its employer check.'
 
 # phys <path>: print the physical path of an existing path, with every link resolved.
 phys() {
@@ -286,6 +289,19 @@ else
 		"sqlfmt, version "*) ok "sqlfmt ${sv#sqlfmt, version }" ;;
 		*) warn "sqlfmt ($sqlfmt_bin does not run)" "$FIX_SQLFMT" ;;
 	esac
+fi
+
+# ---- 9. employer terms file -------------------------------------------------
+# tests/test-public-tree.sh scans the tracked tree for the terms in this file, and it skips the scan when
+# the file is absent or empty. The path rule is the same as in that suite. A gap is a WARN, not missing.
+# The doctor never prints a term.
+terms_file="${EMPLOYER_TERMS_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/anaiis-dotfiles/employer-terms.txt}"
+if [ ! -f "$terms_file" ]; then
+	warn "employer terms file (absent)" "$FIX_TERMS"
+elif ! grep -q '[^[:space:]]' "$terms_file" 2>/dev/null; then
+	warn "employer terms file (empty)" "$FIX_TERMS"
+else
+	ok "employer terms file"
 fi
 
 printf 'doctor: %s missing\n' "$MISSING"
