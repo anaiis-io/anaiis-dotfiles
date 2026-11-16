@@ -42,6 +42,7 @@ brew "wget"
 brew "datadog-labs/pack/pup", trusted: true
 brew "getsentry/tools/sentry", trusted: true
 brew "greptileai/tap/greptile", trusted: true
+cask "antigravity-cli"
 cask "bitwarden"
 cask "claude-code@latest"
 cask "coderabbit"

@@ -70,7 +70,7 @@ The checks cover the shell wiring, the `~/.claude` links, the plugins, the GitHu
 
 - **Update.** Run `git pull`. The `~/.claude` links point into the clone, so a pull changes the live config.
 - **Packages.** `bash ~/anaiis-dotfiles/claude/scripts/brew-sync.sh install` installs the `Brewfile`. The `check` verb reports drift. The `dump` verb adds new entries. No verb removes one.
-- **Models.** The aliases `claude-fast`, `claude-fable`, and `claude-opus` start one model. The suffixes `-turbo` and `-max` raise the effort. `bash/shared.bash` defines them.
+- **Models.** `claude-fast` and `claude-turbo` start opusplan. The Fable tiers are `claude-fable-fast` (medium), `-turbo` (high), `-hyper` (xhigh), and `-max`. The Opus aliases are `claude-opus` (high), `-turbo` (xhigh), and `-max`. `bash/shared.bash` defines them.
 - **Machine-local settings.** Put secrets and overrides in `~/.bashrc.local`. The installer does not source it. Add a line that sources it after the `shared.bash` line.
 - **Git hooks.** Claude Code installs the three hooks in a repo on the first prompt. Outside Claude Code, run `bash ~/.claude/scripts/install-repo-hooks.sh` once in the repo.
 - **Other shells.** The installer edits only bash config. For zsh or fish, add `~/anaiis-dotfiles/bin` to PATH by hand.
