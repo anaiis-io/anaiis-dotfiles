@@ -36,6 +36,8 @@ Three-file hierarchy (none are symlinked; all machine-local except `shared.bash`
 
 Claude Code values follow `claude/rules/environment.md`, section "Configuration homes". Dials (model, effort, limits) go in `shared.bash`. Wiring (the shell pin) goes in the `env` block of `claude/settings.json`. A name never appears in both. The dotfiles set no git identity: each machine sets it in its own git config.
 
+`tests/test-shared-bash-aliases.sh` checks the `claude-*` alias table. The opt-in `E2E=1 bash tests/e2e-model-alias.sh` checks that each alias model follows its export. Run it after a model bump.
+
 ## Bash baseline
 
 The harness runs on one approved Homebrew bash major.
