@@ -210,7 +210,7 @@ echo "# 5. Configuration homes"
 if [ "$HAVE_JQ" -eq 1 ]; then
 	REPO5="$WORK/repo5"
 	make_fixture "$REPO_DIR" "$REPO5"
-	# CLAUDE_CODE_EFFORT_LEVEL is exported in bash/shared.bash and set by four aliases.
+	# CLAUDE_CODE_EFFORT_LEVEL is exported in bash/shared.bash and set by the claude-* aliases.
 	jq '.model = "opus" | .modelSettings = {"opus": {"effortLevel": "high"}} | .env.CLAUDE_CODE_EFFORT_LEVEL = "high"' \
 		"$REPO5/claude/settings.json" >"$WORK/s5.json" && mv "$WORK/s5.json" "$REPO5/claude/settings.json"
 	RULES_DOCTOR_REPO_DIR="$REPO5" bash "$DOCTOR" >"$WORK/homes.out" 2>&1
